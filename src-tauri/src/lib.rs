@@ -5,10 +5,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
 use tauri::Manager;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -17,6 +18,8 @@ pub const MAX_FILE_SIZE_BYTES: u64 = 25 * 1024 * 1024; // 25 MiB cap to prevent 
 
 static AUTHORIZED_WORKSPACE: RwLock<Option<PathBuf>> = RwLock::new(None);
 static APP_HANDLE: RwLock<Option<tauri::AppHandle>> = RwLock::new(None);
+static DIALOG_AUTHORIZED_PATHS: LazyLock<RwLock<HashSet<PathBuf>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
 
 pub fn set_app_handle(handle: tauri::AppHandle) {
     if let Ok(mut guard) = APP_HANDLE.write() {
@@ -38,6 +41,41 @@ pub fn get_active_workspace_bound() -> Option<PathBuf> {
     AUTHORIZED_WORKSPACE.read().ok().and_then(|g| g.clone())
 }
 
+pub fn clear_dialog_authorized_paths() {
+    if let Ok(mut set) = DIALOG_AUTHORIZED_PATHS.write() {
+        set.clear();
+    }
+}
+
+pub fn authorize_dialog_path_inner(path_str: &str) -> Result<PathBuf, String> {
+    let resolved = validate_secure_path(path_str, Some(""))?;
+    if let Ok(mut set) = DIALOG_AUTHORIZED_PATHS.write() {
+        set.insert(resolved.clone());
+    }
+    Ok(resolved)
+}
+
+fn is_dialog_authorized(resolved_path: &Path) -> bool {
+    if let Ok(guard) = DIALOG_AUTHORIZED_PATHS.read() {
+        if guard.contains(resolved_path) {
+            return true;
+        }
+        // For assets (e.g. <note_dir>/assets/img_<timestamp>.png) created by save_pasted_image,
+        // check if parent or grandparent directory contains an authorized dialog note.
+        if let Some(parent) = resolved_path.parent() {
+            if guard.iter().any(|p| p.parent() == Some(parent)) {
+                return true;
+            }
+            if let Some(grandparent) = parent.parent() {
+                if guard.iter().any(|p| p.parent() == Some(grandparent)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn set_workspace_root_inner(dir_path: &str) -> Result<PathBuf, String> {
     let canon = validate_secure_path(dir_path, Some(dir_path))?;
     if !canon.is_dir() {
@@ -47,8 +85,16 @@ pub fn set_workspace_root_inner(dir_path: &str) -> Result<PathBuf, String> {
     Ok(canon)
 }
 
-pub fn validate_dialog_path(path_str: &str) -> Result<PathBuf, String> {
-    validate_secure_path(path_str, Some(""))
+pub fn validate_strict_workspace_path(path_str: &str) -> Result<PathBuf, String> {
+    let resolved = validate_secure_path(path_str, Some(""))?;
+    if let Some(canon_ws) = get_active_workspace_bound() {
+        if !resolved.starts_with(&canon_ws) {
+            return Err(
+                "Security Error: Target path escapes the active workspace boundary.".into(),
+            );
+        }
+    }
+    Ok(resolved)
 }
 
 pub fn validate_secure_path(
@@ -85,7 +131,7 @@ pub fn validate_secure_path(
         return Err("Security Error: Unresolvable filesystem path.".into());
     };
 
-    // Enforce explicit workspace parameter if provided, otherwise enforce active workspace lock
+    // Enforce explicit workspace parameter if provided, otherwise check session allowlist / active workspace lock
     if let Some(ws_str) = explicit_workspace {
         if !ws_str.is_empty() {
             let canon_ws = fs::canonicalize(ws_str)
@@ -96,11 +142,16 @@ pub fn validate_secure_path(
                 );
             }
         }
-    } else if let Some(canon_ws) = get_active_workspace_bound() {
-        if !resolved_path.starts_with(&canon_ws) {
-            return Err(
-                "Security Error: Target path escapes the active workspace boundary.".into(),
-            );
+    } else {
+        if is_dialog_authorized(&resolved_path) {
+            return Ok(resolved_path);
+        }
+        if let Some(canon_ws) = get_active_workspace_bound() {
+            if !resolved_path.starts_with(&canon_ws) {
+                return Err(
+                    "Security Error: Target path escapes the active workspace boundary.".into(),
+                );
+            }
         }
     }
 
@@ -176,12 +227,21 @@ pub mod commands {
         Ok(canon.to_string_lossy().to_string())
     }
 
+    #[tauri::command]
+    pub fn authorize_dialog_path(app: tauri::AppHandle, path: String) -> Result<String, String> {
+        let canon = authorize_dialog_path_inner(&path)?;
+        if let Some(parent) = canon.parent() {
+            let _ = app.asset_protocol_scope().allow_directory(parent, true);
+        }
+        Ok(canon.to_string_lossy().to_string())
+    }
+
     /// Best-effort single-pass zero overwrite before unlinking.
     /// Note: On wear-leveled SSDs, NVMe, or copy-on-write filesystems (NTFS/APFS/Btrfs),
     /// physical blocks may persist in flash translation layers until TRIM/garbage collection.
     #[tauri::command]
     pub fn delete_note_file(file_path: String) -> Result<(), String> {
-        let path = validate_secure_path(&file_path, None)?;
+        let path = validate_strict_workspace_path(&file_path)?;
         if !path.exists() {
             return Ok(());
         }
@@ -263,7 +323,7 @@ pub mod commands {
 
     #[tauri::command]
     pub fn read_markdown_file(file_path: String) -> Result<String, String> {
-        let path = validate_dialog_path(&file_path)?;
+        let path = validate_secure_path(&file_path, None)?;
         enforce_file_size_limit(&path)?;
         fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))
     }
@@ -273,7 +333,7 @@ pub mod commands {
         if content.len() as u64 > MAX_FILE_SIZE_BYTES {
             return Err("Note content exceeds the 25 MB maximum size limit.".into());
         }
-        let path = validate_dialog_path(&file_path)?;
+        let path = validate_secure_path(&file_path, None)?;
         atomic_write_bytes(&path, content.as_bytes())
     }
 
@@ -282,7 +342,7 @@ pub mod commands {
         if file_path.to_lowercase().ends_with(".enc") {
             return Ok(true);
         }
-        let path = validate_dialog_path(&file_path)?;
+        let path = validate_secure_path(&file_path, None)?;
         if !path.exists() {
             return Ok(false);
         }
@@ -310,7 +370,7 @@ pub mod commands {
             return Err("Image exceeds the 25 MB size limit.".into());
         }
 
-        let note_path = validate_dialog_path(&active_md_path)?;
+        let note_path = validate_secure_path(&active_md_path, None)?;
         let note_dir = note_path
             .parent()
             .ok_or_else(|| "Note path has no parent directory.".to_string())?;
@@ -420,7 +480,7 @@ pub mod commands {
         if content.len() as u64 > MAX_FILE_SIZE_BYTES {
             return Err("Note content exceeds the 25 MB maximum size limit.".into());
         }
-        let path = validate_dialog_path(&file_path)?;
+        let path = validate_secure_path(&file_path, None)?;
         let pass_guard = Zeroizing::new(password);
         let content_guard = Zeroizing::new(content);
 
@@ -462,7 +522,7 @@ pub mod commands {
         file_path: String,
         password: String,
     ) -> Result<String, String> {
-        let path = validate_dialog_path(&file_path)?;
+        let path = validate_secure_path(&file_path, None)?;
         enforce_file_size_limit(&path)?;
         let pass_guard = Zeroizing::new(password);
 
@@ -531,7 +591,7 @@ pub mod commands {
         title: String,
         theme: String,
     ) -> Result<(), String> {
-        let path = validate_dialog_path(&target_path)?;
+        let path = validate_secure_path(&target_path, None)?;
 
         let mut options = pulldown_cmark::Options::empty();
         options.insert(pulldown_cmark::Options::ENABLE_TABLES);
@@ -629,6 +689,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::set_workspace_root,
+            commands::authorize_dialog_path,
             commands::list_markdown_files,
             commands::read_markdown_file,
             commands::save_markdown_file,

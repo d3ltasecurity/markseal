@@ -111,42 +111,97 @@ fn test_html_export_strips_xss_payloads() {
 }
 
 #[test]
-fn test_export_and_save_as_allowed_outside_workspace() {
+fn test_non_dialog_outside_path_rejected() {
     let _guard = TEST_MUTEX.lock().unwrap();
-    let base_temp = std::env::temp_dir().join("mf_test_dialog_base");
-    let ws_dir = base_temp.join("vault_subfolder");
-    let outside_dir = base_temp.join("outside_folder");
+    clear_dialog_authorized_paths();
+    let base_temp = std::env::temp_dir().join("mf_test_unauth_outside");
+    let ws_dir = base_temp.join("workspace");
+    let outside_dir = base_temp.join("outside");
     let _ = fs::create_dir_all(&ws_dir);
     let _ = fs::create_dir_all(&outside_dir);
 
-    // Lock AUTHORIZED_WORKSPACE to ws_dir
     set_workspace_root_inner(ws_dir.to_str().unwrap()).unwrap();
 
-    let outside_md = outside_dir.join("outside_save.md");
+    let outside_md = outside_dir.join("unauth.md");
     let outside_md_str = outside_md.to_str().unwrap().to_string();
-    let outside_html = outside_dir.join("outside_export.html");
+    let outside_html = outside_dir.join("unauth.html");
+    let outside_html_str = outside_html.to_str().unwrap().to_string();
+    let outside_enc = outside_dir.join("unauth.md.enc");
+    let outside_enc_str = outside_enc.to_str().unwrap().to_string();
+
+    // Verify all operations fail on un-authorized path outside workspace
+    assert!(save_markdown_file(outside_md_str.clone(), "# Content".into()).is_err());
+    assert!(read_markdown_file(outside_md_str.clone()).is_err());
+    assert!(save_encrypted_markdown(outside_enc_str.clone(), "# Secret".into(), "pass".into()).is_err());
+    assert!(export_to_html(outside_html_str.clone(), "# HTML".into(), "Title".into(), "dark".into()).is_err());
+
+    set_active_workspace_bound(None);
+    clear_dialog_authorized_paths();
+    let _ = fs::remove_dir_all(&base_temp);
+}
+
+#[test]
+fn test_authorized_dialog_path_succeeds_for_save_and_export() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    clear_dialog_authorized_paths();
+    let base_temp = std::env::temp_dir().join("mf_test_auth_outside");
+    let ws_dir = base_temp.join("workspace");
+    let outside_dir = base_temp.join("outside");
+    let _ = fs::create_dir_all(&ws_dir);
+    let _ = fs::create_dir_all(&outside_dir);
+
+    set_workspace_root_inner(ws_dir.to_str().unwrap()).unwrap();
+
+    let outside_md = outside_dir.join("dialog_saved.md");
+    let outside_md_str = outside_md.to_str().unwrap().to_string();
+    let outside_html = outside_dir.join("dialog_export.html");
     let outside_html_str = outside_html.to_str().unwrap().to_string();
 
-    // 1. save_markdown_file using validate_dialog_path should succeed on outside path
-    let save_res = save_markdown_file(outside_md_str.clone(), "# Outside Save".into());
-    assert!(save_res.is_ok(), "save_markdown_file should succeed outside workspace via dialog path");
+    // Authorize paths via dialog session allowlist
+    authorize_dialog_path_inner(&outside_md_str).unwrap();
+    authorize_dialog_path_inner(&outside_html_str).unwrap();
+
+    // 1. save_markdown_file should succeed
+    assert!(save_markdown_file(outside_md_str.clone(), "# Dialog Content".into()).is_ok());
     assert!(outside_md.exists());
 
-    // 2. export_to_html using validate_dialog_path should succeed on outside path
-    let export_res = export_to_html(
-        outside_html_str.clone(),
-        "# HTML Content".into(),
-        "Title".into(),
-        "dark".into(),
-    );
-    assert!(export_res.is_ok(), "export_to_html should succeed outside workspace via dialog path");
+    // 2. read_markdown_file should succeed
+    let content = read_markdown_file(outside_md_str.clone()).unwrap();
+    assert_eq!(content, "# Dialog Content");
+
+    // 3. export_to_html should succeed
+    assert!(export_to_html(outside_html_str.clone(), "# HTML Content".into(), "Doc".into(), "dark".into()).is_ok());
     assert!(outside_html.exists());
 
-    // 3. delete_note_file is strictly confined to workspace and must fail on outside path
-    let delete_res = delete_note_file(outside_md_str.clone());
-    assert!(delete_res.is_err(), "delete_note_file must be rejected for paths outside active workspace");
-
-    // Clean up
     set_active_workspace_bound(None);
+    clear_dialog_authorized_paths();
+    let _ = fs::remove_dir_all(&base_temp);
+}
+
+#[test]
+fn test_delete_outside_workspace_always_rejected() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    clear_dialog_authorized_paths();
+    let base_temp = std::env::temp_dir().join("mf_test_delete_strict");
+    let ws_dir = base_temp.join("workspace");
+    let outside_dir = base_temp.join("outside");
+    let _ = fs::create_dir_all(&ws_dir);
+    let _ = fs::create_dir_all(&outside_dir);
+
+    set_workspace_root_inner(ws_dir.to_str().unwrap()).unwrap();
+
+    let outside_file = outside_dir.join("cannot_delete.md");
+    fs::write(&outside_file, "# Important Outside Note").unwrap();
+    let outside_str = outside_file.to_str().unwrap().to_string();
+
+    // Even if path was authorized by dialog, delete_note_file MUST be rejected
+    authorize_dialog_path_inner(&outside_str).unwrap();
+
+    let delete_res = delete_note_file(outside_str.clone());
+    assert!(delete_res.is_err(), "delete_note_file must be rejected for outside paths even if dialog-authorized");
+    assert!(outside_file.exists(), "Outside file must not have been deleted");
+
+    set_active_workspace_bound(None);
+    clear_dialog_authorized_paths();
     let _ = fs::remove_dir_all(&base_temp);
 }

@@ -271,6 +271,11 @@ export default function App() {
       });
       if (!chosen) return;
       targetPath = chosen;
+      try {
+        await invoke("authorize_dialog_path", { path: chosen });
+      } catch (err) {
+        console.warn("authorize_dialog_path error:", err);
+      }
     }
 
     try {
@@ -369,6 +374,11 @@ export default function App() {
         });
         if (!chosen) return;
         encPath = chosen;
+        try {
+          await invoke("authorize_dialog_path", { path: chosen });
+        } catch (err) {
+          console.warn("authorize_dialog_path error:", err);
+        }
       } else if (!encPath.toLowerCase().endsWith(".enc")) {
         encPath = `${encPath}.enc`;
       }
@@ -446,6 +456,11 @@ export default function App() {
       filters: [{ name: "HTML Document", extensions: ["html"] }],
     });
     if (!targetPath) return;
+    try {
+      await invoke("authorize_dialog_path", { path: targetPath });
+    } catch (err) {
+      console.warn("authorize_dialog_path error:", err);
+    }
 
     try {
       await invoke("export_to_html", {
