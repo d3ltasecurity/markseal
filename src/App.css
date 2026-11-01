@@ -1,4 +1,5 @@
-:root {
+:root,
+.app-shell.theme-dark {
   --bg-shell: rgba(13, 17, 23, 0.78);
   --bg-sidebar: rgba(22, 27, 34, 0.72);
   --bg-editor: rgba(13, 17, 23, 0.55);
@@ -7,9 +8,14 @@
   --border-color: rgba(48, 54, 61, 0.85);
   --accent: #58a6ff;
   --vault-gold: #d29922;
+
+  --crepe-color-background: #0d1117;
+  --crepe-color-on-background: #e6edf3;
+  --crepe-color-surface: #161b22;
+  --crepe-color-primary: #58a6ff;
 }
 
-.theme-nord {
+.app-shell.theme-nord {
   --bg-shell: rgba(46, 52, 64, 0.82);
   --bg-sidebar: rgba(59, 66, 82, 0.75);
   --bg-editor: rgba(46, 52, 64, 0.6);
@@ -17,9 +23,15 @@
   --text-muted: #d8dee9;
   --border-color: rgba(76, 86, 106, 0.85);
   --accent: #88c0d0;
+  --vault-gold: #ebcb8b;
+
+  --crepe-color-background: #2e3440;
+  --crepe-color-on-background: #eceff4;
+  --crepe-color-surface: #3b4252;
+  --crepe-color-primary: #88c0d0;
 }
 
-.theme-light {
+.app-shell.theme-light {
   --bg-shell: rgba(255, 255, 255, 0.88);
   --bg-sidebar: rgba(246, 248, 250, 0.85);
   --bg-editor: rgba(255, 255, 255, 0.75);
@@ -27,9 +39,15 @@
   --text-muted: #57606a;
   --border-color: #d0d7de;
   --accent: #0969da;
+  --vault-gold: #b08800;
+
+  --crepe-color-background: #ffffff;
+  --crepe-color-on-background: #24292f;
+  --crepe-color-surface: #f6f8fa;
+  --crepe-color-primary: #0969da;
 }
 
-.theme-solarized {
+.app-shell.theme-solarized {
   --bg-shell: rgba(253, 246, 227, 0.9);
   --bg-sidebar: rgba(238, 232, 213, 0.88);
   --bg-editor: rgba(253, 246, 227, 0.8);
@@ -37,6 +55,54 @@
   --text-muted: #657b83;
   --border-color: #93a1a1;
   --accent: #268bd2;
+  --vault-gold: #b58900;
+
+  --crepe-color-background: #fdf6e3;
+  --crepe-color-on-background: #586e75;
+  --crepe-color-surface: #eee8d5;
+  --crepe-color-primary: #268bd2;
+}
+
+/* CodeMirror / Pre / Code per theme */
+.app-shell.theme-dark .cm-editor,
+.app-shell.theme-dark pre,
+.app-shell.theme-dark code {
+  background-color: #161b22;
+  color: #e6edf3;
+  border-color: rgba(48, 54, 61, 0.85);
+}
+
+.app-shell.theme-nord .cm-editor,
+.app-shell.theme-nord pre,
+.app-shell.theme-nord code {
+  background-color: #3b4252;
+  color: #eceff4;
+  border-color: rgba(76, 86, 106, 0.85);
+}
+
+.app-shell.theme-light .cm-editor,
+.app-shell.theme-light pre,
+.app-shell.theme-light code {
+  background-color: #f6f8fa;
+  color: #24292f;
+  border-color: #d0d7de;
+}
+
+.app-shell.theme-solarized .cm-editor,
+.app-shell.theme-solarized pre,
+.app-shell.theme-solarized code {
+  background-color: #eee8d5;
+  color: #586e75;
+  border-color: #93a1a1;
+}
+
+.milkdown-surface {
+  color: var(--crepe-color-on-background);
+}
+
+.milkdown-surface .milkdown {
+  background: transparent;
+  color: var(--crepe-color-on-background);
 }
 
 * {

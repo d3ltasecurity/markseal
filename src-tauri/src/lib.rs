@@ -16,6 +16,17 @@ pub const ENC_HEADER: &str = "MARKFORGE_ENC_V1";
 pub const MAX_FILE_SIZE_BYTES: u64 = 25 * 1024 * 1024; // 25 MiB cap to prevent OOM
 
 static AUTHORIZED_WORKSPACE: RwLock<Option<PathBuf>> = RwLock::new(None);
+static APP_HANDLE: RwLock<Option<tauri::AppHandle>> = RwLock::new(None);
+
+pub fn set_app_handle(handle: tauri::AppHandle) {
+    if let Ok(mut guard) = APP_HANDLE.write() {
+        *guard = Some(handle);
+    }
+}
+
+pub fn get_app_handle() -> Option<tauri::AppHandle> {
+    APP_HANDLE.read().ok().and_then(|g| g.clone())
+}
 
 pub fn set_active_workspace_bound(ws_path: Option<PathBuf>) {
     if let Ok(mut guard) = AUTHORIZED_WORKSPACE.write() {
@@ -25,6 +36,19 @@ pub fn set_active_workspace_bound(ws_path: Option<PathBuf>) {
 
 pub fn get_active_workspace_bound() -> Option<PathBuf> {
     AUTHORIZED_WORKSPACE.read().ok().and_then(|g| g.clone())
+}
+
+pub fn set_workspace_root_inner(dir_path: &str) -> Result<PathBuf, String> {
+    let canon = validate_secure_path(dir_path, Some(dir_path))?;
+    if !canon.is_dir() {
+        return Err("Selected workspace path is not a directory.".into());
+    }
+    set_active_workspace_bound(Some(canon.clone()));
+    Ok(canon)
+}
+
+pub fn validate_dialog_path(path_str: &str) -> Result<PathBuf, String> {
+    validate_secure_path(path_str, Some(""))
 }
 
 pub fn validate_secure_path(
@@ -145,12 +169,10 @@ pub mod commands {
     use super::*;
 
     #[tauri::command]
-    pub fn set_workspace_root(dir_path: String) -> Result<String, String> {
-        let canon = validate_secure_path(&dir_path, Some(&dir_path))?;
-        if !canon.is_dir() {
-            return Err("Selected workspace path is not a directory.".into());
-        }
-        set_active_workspace_bound(Some(canon.clone()));
+    pub fn set_workspace_root(app: tauri::AppHandle, dir_path: String) -> Result<String, String> {
+        set_app_handle(app.clone());
+        let canon = set_workspace_root_inner(&dir_path)?;
+        let _ = app.asset_protocol_scope().allow_directory(&canon, true);
         Ok(canon.to_string_lossy().to_string())
     }
 
@@ -179,13 +201,19 @@ pub mod commands {
         delete_note_file(file_path)
     }
 
+    pub fn list_markdown_files_inner(dir_path: &str) -> Result<Vec<String>, String> {
+        let root = set_workspace_root_inner(dir_path)?;
+        let mut results = Vec::new();
+        collect_md_files(&root, &root, &mut results)?;
+        results.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        Ok(results)
+    }
+
     #[tauri::command]
-    pub fn list_markdown_files(dir_path: String) -> Result<Vec<String>, String> {
-        let root = validate_secure_path(&dir_path, Some(&dir_path))?;
-        if !root.exists() || !root.is_dir() {
-            return Err("Directory does not exist.".into());
-        }
-        set_active_workspace_bound(Some(root.clone()));
+    pub fn list_markdown_files(app: tauri::AppHandle, dir_path: String) -> Result<Vec<String>, String> {
+        set_app_handle(app.clone());
+        let root = set_workspace_root_inner(&dir_path)?;
+        let _ = app.asset_protocol_scope().allow_directory(&root, true);
         let mut results = Vec::new();
         collect_md_files(&root, &root, &mut results)?;
         results.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
@@ -235,7 +263,7 @@ pub mod commands {
 
     #[tauri::command]
     pub fn read_markdown_file(file_path: String) -> Result<String, String> {
-        let path = validate_secure_path(&file_path, None)?;
+        let path = validate_dialog_path(&file_path)?;
         enforce_file_size_limit(&path)?;
         fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))
     }
@@ -245,7 +273,7 @@ pub mod commands {
         if content.len() as u64 > MAX_FILE_SIZE_BYTES {
             return Err("Note content exceeds the 25 MB maximum size limit.".into());
         }
-        let path = validate_secure_path(&file_path, None)?;
+        let path = validate_dialog_path(&file_path)?;
         atomic_write_bytes(&path, content.as_bytes())
     }
 
@@ -254,7 +282,7 @@ pub mod commands {
         if file_path.to_lowercase().ends_with(".enc") {
             return Ok(true);
         }
-        let path = validate_secure_path(&file_path, None)?;
+        let path = validate_dialog_path(&file_path)?;
         if !path.exists() {
             return Ok(false);
         }
@@ -282,13 +310,17 @@ pub mod commands {
             return Err("Image exceeds the 25 MB size limit.".into());
         }
 
-        let note_path = validate_secure_path(&active_md_path, None)?;
+        let note_path = validate_dialog_path(&active_md_path)?;
         let note_dir = note_path
             .parent()
             .ok_or_else(|| "Note path has no parent directory.".to_string())?;
         let assets_dir = note_dir.join("assets");
         fs::create_dir_all(&assets_dir)
             .map_err(|e| format!("Failed to create assets directory: {}", e))?;
+
+        if let Some(app) = get_app_handle() {
+            let _ = app.asset_protocol_scope().allow_directory(&assets_dir, true);
+        }
 
         let clean_ext: String = extension
             .chars()
@@ -323,7 +355,7 @@ pub mod commands {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
-        let files = list_markdown_files(workspace_root)?;
+        let files = list_markdown_files_inner(&workspace_root)?;
         let mut matches = Vec::new();
         let target = if case_sensitive {
             query.clone()
@@ -388,7 +420,7 @@ pub mod commands {
         if content.len() as u64 > MAX_FILE_SIZE_BYTES {
             return Err("Note content exceeds the 25 MB maximum size limit.".into());
         }
-        let path = validate_secure_path(&file_path, None)?;
+        let path = validate_dialog_path(&file_path)?;
         let pass_guard = Zeroizing::new(password);
         let content_guard = Zeroizing::new(content);
 
@@ -430,7 +462,7 @@ pub mod commands {
         file_path: String,
         password: String,
     ) -> Result<String, String> {
-        let path = validate_secure_path(&file_path, None)?;
+        let path = validate_dialog_path(&file_path)?;
         enforce_file_size_limit(&path)?;
         let pass_guard = Zeroizing::new(password);
 
@@ -499,7 +531,7 @@ pub mod commands {
         title: String,
         theme: String,
     ) -> Result<(), String> {
-        let path = validate_secure_path(&target_path, None)?;
+        let path = validate_dialog_path(&target_path)?;
 
         let mut options = pulldown_cmark::Options::empty();
         options.insert(pulldown_cmark::Options::ENABLE_TABLES);
@@ -584,6 +616,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
+            set_app_handle(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "windows")]
                 {

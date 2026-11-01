@@ -9,7 +9,7 @@ fn test_hardened_encryption_and_tamper_detection() {
     let _guard = TEST_MUTEX.lock().unwrap();
     let temp_dir = std::env::temp_dir().join("mf_test_enc");
     let _ = fs::create_dir_all(&temp_dir);
-    set_workspace_root(temp_dir.to_str().unwrap().to_string()).unwrap();
+    set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
 
     let test_file = temp_dir.join("markforge_hardened_vault.md.enc");
     let path_str = test_file.to_str().unwrap().to_string();
@@ -44,7 +44,7 @@ fn test_path_traversal_null_byte_and_workspace_confinement() {
     // Test active workspace confinement blocks outside absolute paths
     let temp_ws = std::env::temp_dir().join("markforge_ws_bound_test");
     let _ = fs::create_dir_all(&temp_ws);
-    set_workspace_root(temp_ws.to_str().unwrap().to_string()).unwrap();
+    set_workspace_root_inner(temp_ws.to_str().unwrap()).unwrap();
 
     let outside_file = std::env::temp_dir().join("outside_escape.md");
     assert!(validate_secure_path(outside_file.to_str().unwrap(), None).is_err());
@@ -59,7 +59,7 @@ fn test_pasted_image_contract_saves_relative_to_note() {
     let _guard = TEST_MUTEX.lock().unwrap();
     let temp_dir = std::env::temp_dir().join("markforge_img_test");
     let _ = fs::create_dir_all(&temp_dir);
-    set_workspace_root(temp_dir.to_str().unwrap().to_string()).unwrap();
+    set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
 
     let note_path = temp_dir.join("my_note.md");
     fs::write(&note_path, "# Note").unwrap();
@@ -84,7 +84,7 @@ fn test_html_export_strips_xss_payloads() {
     let _guard = TEST_MUTEX.lock().unwrap();
     let temp_dir = std::env::temp_dir().join("mf_test_xss");
     let _ = fs::create_dir_all(&temp_dir);
-    set_workspace_root(temp_dir.to_str().unwrap().to_string()).unwrap();
+    set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
 
     let out_html = temp_dir.join("markforge_xss_test.html");
     let path_str = out_html.to_str().unwrap().to_string();
@@ -108,4 +108,45 @@ fn test_html_export_strips_xss_payloads() {
     let _ = fs::remove_file(out_html);
     set_active_workspace_bound(None);
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_export_and_save_as_allowed_outside_workspace() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    let base_temp = std::env::temp_dir().join("mf_test_dialog_base");
+    let ws_dir = base_temp.join("vault_subfolder");
+    let outside_dir = base_temp.join("outside_folder");
+    let _ = fs::create_dir_all(&ws_dir);
+    let _ = fs::create_dir_all(&outside_dir);
+
+    // Lock AUTHORIZED_WORKSPACE to ws_dir
+    set_workspace_root_inner(ws_dir.to_str().unwrap()).unwrap();
+
+    let outside_md = outside_dir.join("outside_save.md");
+    let outside_md_str = outside_md.to_str().unwrap().to_string();
+    let outside_html = outside_dir.join("outside_export.html");
+    let outside_html_str = outside_html.to_str().unwrap().to_string();
+
+    // 1. save_markdown_file using validate_dialog_path should succeed on outside path
+    let save_res = save_markdown_file(outside_md_str.clone(), "# Outside Save".into());
+    assert!(save_res.is_ok(), "save_markdown_file should succeed outside workspace via dialog path");
+    assert!(outside_md.exists());
+
+    // 2. export_to_html using validate_dialog_path should succeed on outside path
+    let export_res = export_to_html(
+        outside_html_str.clone(),
+        "# HTML Content".into(),
+        "Title".into(),
+        "dark".into(),
+    );
+    assert!(export_res.is_ok(), "export_to_html should succeed outside workspace via dialog path");
+    assert!(outside_html.exists());
+
+    // 3. delete_note_file is strictly confined to workspace and must fail on outside path
+    let delete_res = delete_note_file(outside_md_str.clone());
+    assert!(delete_res.is_err(), "delete_note_file must be rejected for paths outside active workspace");
+
+    // Clean up
+    set_active_workspace_bound(None);
+    let _ = fs::remove_dir_all(&base_temp);
 }

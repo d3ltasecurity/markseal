@@ -58,6 +58,8 @@ export default function App() {
 
   const editorRef = useRef<HTMLDivElement | null>(null);
   const crepeRef = useRef<Crepe | null>(null);
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   const activeTab = tabs.find((t) => t.path === activeTabPath) || tabs[0];
 
   // Parse headings for live Outline
@@ -94,6 +96,7 @@ export default function App() {
       return URL.createObjectURL(file);
     };
 
+    let mermaidIdCounter = 0;
     const crepe = new Crepe({
       root: editorRef.current,
       defaultValue: activeTab.content,
@@ -102,6 +105,36 @@ export default function App() {
         [Crepe.Feature.Latex]: true,
       },
       featureConfigs: {
+        [Crepe.Feature.CodeMirror]: {
+          renderPreview: (language, content, applyPreview) => {
+            if (language.toLowerCase() !== "mermaid") return null;
+
+            const loading = document.createElement("div");
+            loading.className = "mermaid-preview-loading";
+            loading.textContent = "Rendering diagram…";
+            const id = `markforge-mermaid-${++mermaidIdCounter}`;
+            const dark = themeRef.current !== "light";
+
+            void import("mermaid")
+              .then(({ default: mermaid }) => {
+                mermaid.initialize({
+                  startOnLoad: false,
+                  securityLevel: "strict",
+                  theme: dark ? "dark" : "default",
+                });
+                return mermaid.render(id, content);
+              })
+              .then(({ svg }) => applyPreview(svg))
+              .catch((error: unknown) => {
+                const failure = document.createElement("div");
+                failure.className = "mermaid-error";
+                failure.textContent = `Unable to render Mermaid diagram: ${String(error)}`;
+                applyPreview(failure);
+              });
+
+            return loading;
+          },
+        },
         [Crepe.Feature.ImageBlock]: {
           onUpload: upload,
           blockOnUpload: upload,
