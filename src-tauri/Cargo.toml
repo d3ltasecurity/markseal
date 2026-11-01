@@ -1,0 +1,31 @@
+[package]
+name = "markforge"
+version = "0.1.0"
+description = "High-performance, zero-knowledge native Markdown editor"
+authors = ["MarkForge Security Team"]
+edition = "2021"
+
+[lib]
+name = "markforge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Phase 3: Hardened Cryptography, Sanitization, Memory Safety & Native UI
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+base64 = "0.22"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+ammonia = "4"
+pulldown-cmark = "0.12"
+window-vibrancy = "0.5"
