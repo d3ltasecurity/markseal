@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { Crepe } from "@milkdown/crepe";
 import "@milkdown/crepe/theme/common/style.css";
@@ -80,9 +80,43 @@ export default function App() {
     let destroyed = false;
     editorRef.current.innerHTML = "";
 
+    const upload = async (file: File): Promise<string> => {
+      const mdPath = activeTab?.path;
+      if (mdPath && (mdPath.includes("/") || mdPath.includes("\\"))) {
+        const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        const ext = file.name.includes(".") ? file.name.split(".").pop() || "png" : "png";
+        return await invoke<string>("save_pasted_image", {
+          activeMdPath: mdPath,
+          imageBytes: bytes,
+          extension: ext,
+        });
+      }
+      return URL.createObjectURL(file);
+    };
+
     const crepe = new Crepe({
       root: editorRef.current,
       defaultValue: activeTab.content,
+      features: {
+        [Crepe.Feature.CodeMirror]: true,
+        [Crepe.Feature.Latex]: true,
+      },
+      featureConfigs: {
+        [Crepe.Feature.ImageBlock]: {
+          onUpload: upload,
+          blockOnUpload: upload,
+          inlineOnUpload: upload,
+          proxyDomURL: (url: string) => {
+            const mdPath = activeTab?.path;
+            if (!mdPath || /^(https?:|data:|blob:|asset:|http:\/\/asset\.localhost)/i.test(url)) return url;
+            const sep = mdPath.includes("\\") ? "\\" : "/";
+            const dir = mdPath.includes(sep) ? mdPath.slice(0, mdPath.lastIndexOf(sep)) : "";
+            if (!dir) return url;
+            const abs = `${dir}${sep}${url.replace(/^\.?[\\/]/, "").replace(/[\\/]/g, sep)}`;
+            return convertFileSrc(abs);
+          },
+        },
+      },
     });
 
     crepe.create().then(() => {
@@ -129,6 +163,11 @@ export default function App() {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected === "string") {
       setWorkspaceRoot(selected);
+      try {
+        await invoke("set_workspace_root", { dirPath: selected });
+      } catch (e) {
+        console.warn("set_workspace_root notice:", e);
+      }
       await refreshWorkspace(selected);
       setStatusMessage(`Opened workspace: ${selected}`);
     }
@@ -313,7 +352,7 @@ export default function App() {
             activeTab.path !== encPath &&
             (activeTab.path.includes("/") || activeTab.path.includes("\\"))
         ) {
-          await invoke("secure_shred_file", { filePath: activeTab.path });
+          await invoke("delete_note_file", { filePath: activeTab.path });
         }
 
         const newName = encPath.split(/[\\/]/).pop() || encPath;
@@ -653,8 +692,11 @@ export default function App() {
                             checked={shredOriginal}
                             onChange={(e) => setShredOriginal(e.target.checked)}
                         />
-                        Zero-fill & shred original unencrypted `.md` file on disk
+                        Overwrite & delete original unencrypted .md file (best-effort on SSDs)
                       </label>
+                      <small style={{ color: "#8b949e", fontSize: "0.76rem", display: "block", marginTop: "2px", marginBottom: "6px" }}>
+                        (Note: Single-pass overwrite cannot guarantee physical block erasure on SSDs, NVMe, or copy-on-write filesystems due to wear leveling.)
+                      </small>
                     </>
                 )}
 

@@ -179,7 +179,7 @@ export default function CrepeEditor({
     };
     // initialContent is intentionally only read when the document changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docId, theme]);
+  }, [docId]);
 
   // Dynamically toggle read-only state.
   useEffect(() => {

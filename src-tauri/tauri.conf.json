@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "markforge",
+  "productName": "MarkForge",
   "version": "0.1.0",
   "identifier": "com.markforge.app",
   "build": {
@@ -14,17 +14,20 @@
       {
         "title": "MarkForge",
         "width": 1280,
-        "height": 800,
-        "minWidth": 800,
-        "minHeight": 500,
+        "height": 820,
         "transparent": true
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "$DOCUMENT/**",
+          "$DESKTOP/**",
+          "$DOWNLOAD/**",
+          "$HOME/**"
+        ]
       }
     }
   },
