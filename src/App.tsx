@@ -1,7 +1,40 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { flushSync } from "react-dom";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { Crepe } from "@milkdown/crepe";
+import { setCodeMirrorTheme } from "@milkdown/crepe/feature/code-mirror";
+import { oneDark } from "@codemirror/theme-one-dark";
+import {
+  CaseSensitive,
+  Check,
+  CircleAlert,
+  Command,
+  CornerDownLeft,
+  Ellipsis,
+  Eye,
+  EyeOff,
+  FileCode2,
+  FileLock2,
+  FilePlus2,
+  FileText,
+  FolderOpen,
+  Lock,
+  LockKeyhole,
+  LockOpen,
+  Maximize2,
+  Minimize2,
+  Palette,
+  PanelLeft,
+  Plus,
+  Printer,
+  Save,
+  Search,
+  ShieldCheck,
+  TriangleAlert,
+  X,
+  Zap,
+} from "lucide-react";
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
 import "./App.css";
@@ -21,7 +54,159 @@ interface SearchMatch {
   snippet: string;
 }
 
-type ThemeName = "dark" | "light" | "nord" | "solarized";
+interface OutlineItem {
+  level: number;
+  text: string;
+  // Index into the editor's rendered h1–h4 list, so a click maps to a real node.
+  domIndex: number;
+}
+
+interface DocStats {
+  words: number;
+  chars: number;
+  lines: number;
+  minutes: number;
+}
+
+type ThemeName = "cobalt" | "ivory" | "neon" | "nordic";
+type Tone = "info" | "success" | "error" | "warn" | "vault";
+
+interface ThemeMeta {
+  id: ThemeName;
+  label: string;
+  dark: boolean;
+  swatch: [string, string];
+}
+
+const THEMES: ThemeMeta[] = [
+  { id: "cobalt", label: "Obsidian Cobalt", dark: true, swatch: ["#05070c", "#1558c9"] },
+  { id: "ivory", label: "Editorial Ivory", dark: false, swatch: ["#f9ebd7", "#046a38"] },
+  { id: "neon", label: "Cyber Neon", dark: true, swatch: ["#080808", "#d4ff3f"] },
+  { id: "nordic", label: "Nordic Slate", dark: true, swatch: ["#1c2028", "#88c0d0"] },
+];
+
+const isThemeDark = (id: ThemeName) => THEMES.find((t) => t.id === id)?.dark ?? true;
+
+// The translucent shell is only correct when the native Mica/Acrylic backdrop sits behind it.
+const IS_NATIVE = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+const HEADING_SELECTOR =
+    ".ProseMirror h1, .ProseMirror h2, .ProseMirror h3, .ProseMirror h4";
+const SIDEBAR_MIN = 200;
+const SIDEBAR_MAX = 460;
+const SIDEBAR_DEFAULT = 260;
+const MAX_SEARCH_ROWS = 200;
+const EMPTY_STATS: DocStats = { words: 0, chars: 0, lines: 0, minutes: 0 };
+
+const WELCOME_NOTE =
+    "# Welcome to MarkForge\n\nA local-first, **zero-knowledge** Markdown editor. Nothing you write leaves this machine.\n\n## Shortcuts\n\n- `Ctrl+K` — command palette\n- `Ctrl+N` — new note\n- `Ctrl+S` — save\n- `Ctrl+L` — encrypt the note with `AES-256-GCM` + `Argon2id`\n- `Ctrl+Shift+F` — search the workspace\n- `Ctrl+E` — export sanitized HTML\n- `Ctrl+P` — print or save as PDF\n- `Ctrl+\\` — focus mode\n\n> Without its passphrase, an encrypted note cannot be recovered.\n";
+
+const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
+const isDiskPath = (path: string) => path.includes("/") || path.includes("\\");
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
+function readStored(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable; preferences are a convenience, not state.
+  }
+}
+
+function initialTheme(): ThemeName {
+  const stored = readStored("markforge.theme");
+  return THEMES.some((t) => t.id === stored) ? (stored as ThemeName) : "cobalt";
+}
+
+function initialSidebarWidth(): number {
+  const stored = Number(readStored("markforge.sidebarWidth"));
+  return Number.isFinite(stored) && stored > 0
+      ? clamp(stored, SIDEBAR_MIN, SIDEBAR_MAX)
+      : SIDEBAR_DEFAULT;
+}
+
+function computeStats(markdown: string): DocStats {
+  const text = markdown.replace(/\r/g, "").replace(/\n+$/, "");
+  if (!text) return EMPTY_STATS;
+  // Drop link/image targets so URLs are not counted as prose.
+  const prose = text.replace(/\]\([^)]*\)/g, "]");
+  const words = prose.match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
+  return {
+    words,
+    chars: text.length,
+    lines: text.split("\n").length,
+    minutes: words === 0 ? 0 : Math.max(1, Math.round(words / 230)),
+  };
+}
+
+const STRENGTH_LABELS = ["", "Weak", "Fair", "Good", "Strong"];
+
+// A rough local estimate (character pool × length). Guidance only, never a gate.
+function scorePassphrase(passphrase: string): number {
+  if (!passphrase) return 0;
+  if (passphrase.length < 8) return 1;
+  let pool = 0;
+  if (/[a-z]/.test(passphrase)) pool += 26;
+  if (/[A-Z]/.test(passphrase)) pool += 26;
+  if (/\d/.test(passphrase)) pool += 10;
+  if (/[^A-Za-z0-9]/.test(passphrase)) pool += 33;
+  const effectiveLength = Math.min(passphrase.length, new Set(passphrase).size * 2);
+  const bits = effectiveLength * Math.log2(Math.max(pool, 2));
+  if (bits < 45) return 1;
+  if (bits < 65) return 2;
+  if (bits < 85) return 3;
+  return 4;
+}
+
+function matchesQuery(haystack: string, query: string): boolean {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const target = haystack.toLowerCase();
+  return tokens.every((token) => target.includes(token));
+}
+
+function Highlighted({
+  text,
+  query,
+  caseSensitive,
+}: {
+  text: string;
+  query: string;
+  caseSensitive: boolean;
+}) {
+  const needle = query.trim();
+  if (!needle) return <>{text}</>;
+  const source = caseSensitive ? text : text.toLowerCase();
+  const target = caseSensitive ? needle : needle.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let hit = source.indexOf(target);
+  while (hit !== -1 && parts.length < 40) {
+    if (hit > cursor) parts.push(text.slice(cursor, hit));
+    parts.push(<mark key={hit}>{text.slice(hit, hit + target.length)}</mark>);
+    cursor = hit + target.length;
+    hit = source.indexOf(target, cursor);
+  }
+  parts.push(text.slice(cursor));
+  return <>{parts}</>;
+}
+
+interface PaletteCommand {
+  id: string;
+  group: string;
+  label: string;
+  keywords?: string;
+  shortcut?: string;
+  icon: React.ReactNode;
+  run: () => void;
+}
 
 export default function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState<string>("");
@@ -30,21 +215,38 @@ export default function App() {
     {
       path: "Untitled-1.md",
       name: "Untitled-1.md",
-      content:
-          "# Welcome to MarkForge 🛡️\n\nHigh-performance, **zero-knowledge** native Markdown editor.\n\nPress `Ctrl+L` to **Encrypt / Lock** any note with `AES-256-GCM` + `Argon2id`.\nPress `Ctrl+E` to **Export Standalone Sanitized HTML**.\nPress `Ctrl+P` to **Print / Export to PDF**.\nPress `Ctrl+Shift+F` for **Workspace Search**.\nPress `Ctrl+N` for **New Note**.\n",
+      content: WELCOME_NOTE,
       isDirty: false,
       isEncrypted: false,
     },
   ]);
   const [activeTabPath, setActiveTabPath] = useState<string>("Untitled-1.md");
-  const [theme, setTheme] = useState<ThemeName>("dark");
-  const [outline, setOutline] = useState<{ level: number; text: string }[]>([]);
+  const [theme, setTheme] = useState<ThemeName>(initialTheme);
+  const [outline, setOutline] = useState<OutlineItem[]>([]);
+  const [activeHeading, setActiveHeading] = useState<number>(-1);
+  const [stats, setStats] = useState<DocStats>(EMPTY_STATS);
+
+  // Layout state
+  const [zen, setZen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+      () => readStored("markforge.sidebarCollapsed") === "1"
+  );
+  const [sidebarWidth, setSidebarWidth] = useState<number>(initialSidebarWidth);
+  const [isResizing, setIsResizing] = useState(false);
 
   // Search Modal State
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchMatch[]>([]);
+  const [searchSel, setSearchSel] = useState(0);
+  const [searchState, setSearchState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [searchError, setSearchError] = useState("");
+
+  // Command Palette State
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const [paletteSel, setPaletteSel] = useState(0);
 
   // Vault Encryption / Decryption Modal State
   const [vaultModal, setVaultModal] = useState<{
@@ -54,33 +256,106 @@ export default function App() {
   const [vaultPassword, setVaultPassword] = useState("");
   const [vaultConfirm, setVaultConfirm] = useState("");
   const [shredOriginal, setShredOriginal] = useState(true);
-  const [statusMessage, setStatusMessage] = useState<string>("Ready");
+  const [showPassphrase, setShowPassphrase] = useState(false);
+  const [vaultError, setVaultError] = useState("");
+  const [vaultBusy, setVaultBusy] = useState(false);
+
+  const [confirmClosePath, setConfirmClosePath] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
+  // `id` re-keys the status line so each new message replays its entrance animation.
+  const [status, setStatus] = useState<{ message: string; tone: Tone; id: number }>({
+    message: "Ready",
+    tone: "info",
+    id: 0,
+  });
 
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const tabBarRef = useRef<HTMLDivElement | null>(null);
   const crepeRef = useRef<Crepe | null>(null);
+  // The tab the live editor instance belongs to; content is only ever committed to this path.
+  const crepePathRef = useRef<string | null>(null);
+  // Markdown of the active tab as last saved/loaded. null = unknown, treat any edit as dirty.
+  const baselineRef = useRef<string | null>(null);
+  const untitledCounter = useRef(1);
+  const searchSeq = useRef(0);
+  const spyFrame = useRef(0);
+  const spyLockUntil = useRef(0);
+  const savedTimer = useRef(0);
   const themeRef = useRef(theme);
   themeRef.current = theme;
-  const activeTab = tabs.find((t) => t.path === activeTabPath) || tabs[0];
 
-  // Parse headings for live Outline
-  const updateOutline = useCallback((markdown: string) => {
-    const lines = markdown.split("\n");
-    const headings: { level: number; text: string }[] = [];
-    for (const line of lines) {
-      const match = line.match(/^(#{1,4})\s+(.+)$/);
-      if (match) {
-        headings.push({ level: match[1].length, text: match[2].trim() });
-      }
+  const activeTab = tabs.find((t) => t.path === activeTabPath) || tabs[0];
+  const anyModalOpen =
+      paletteOpen || isSearchOpen || vaultModal.mode !== null || confirmClosePath !== null;
+
+  const notify = useCallback((message: string, tone: Tone = "info") => {
+    setStatus((prev) => ({ message, tone, id: prev.id + 1 }));
+  }, []);
+
+  // Theme switch with a circular reveal from the point that was clicked. Falls back to an
+  // instant swap when the View Transitions API is missing or the user prefers reduced motion.
+  const switchTheme = (next: ThemeName, origin?: { x: number; y: number }) => {
+    if (next === theme) return;
+    const doc = document as Document & {
+      startViewTransition?: (update: () => void) => unknown;
+    };
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!doc.startViewTransition || reduceMotion) {
+      setTheme(next);
+      return;
     }
-    setOutline(headings);
+    const root = document.documentElement;
+    root.style.setProperty("--vt-x", `${origin?.x ?? window.innerWidth / 2}px`);
+    root.style.setProperty("--vt-y", `${origin?.y ?? 0}px`);
+    doc.startViewTransition(() => {
+      flushSync(() => setTheme(next));
+    });
+  };
+
+  const flashSaved = () => {
+    setJustSaved(true);
+    window.clearTimeout(savedTimer.current);
+    savedTimer.current = window.setTimeout(() => setJustSaved(false), 1400);
+  };
+
+  const focusEditor = () => {
+    window.setTimeout(() => {
+      editorRef.current?.querySelector<HTMLElement>(".ProseMirror")?.focus();
+    }, 0);
+  };
+
+  // Outline + stats are derived from the live editor: headings come from the rendered DOM so
+  // the list always matches what a click can scroll to (code-block "#" lines never leak in).
+  const refreshDerived = useCallback((markdown: string) => {
+    setStats(computeStats(markdown));
+    const root = editorRef.current;
+    const headings = root
+        ? Array.from(root.querySelectorAll<HTMLElement>(HEADING_SELECTOR))
+        : [];
+    setOutline(
+        headings
+            .map((el, domIndex) => ({
+              level: Number(el.tagName.charAt(1)),
+              text: (el.textContent || "").trim(),
+              domIndex,
+            }))
+            .filter((h) => h.text.length > 0)
+    );
   }, []);
 
   // Initialize / Rebuild Milkdown Crepe on active tab switch
   useEffect(() => {
     if (!editorRef.current || !activeTab) return;
 
+    const host = editorRef.current;
+    const tabPath = activeTab.path;
     let destroyed = false;
-    editorRef.current.innerHTML = "";
+    let userTouched = false;
+    let refreshTimer = 0;
+    host.innerHTML = "";
+    baselineRef.current = activeTab.isDirty ? null : activeTab.content;
 
     const upload = async (file: File): Promise<string> => {
       const mdPath = activeTab?.path;
@@ -96,9 +371,17 @@ export default function App() {
       return URL.createObjectURL(file);
     };
 
+    // Editor plugins normalise the document right after load; only edits that follow real
+    // user input may flip the tab to dirty.
+    const markTouched = () => {
+      userTouched = true;
+    };
+    const touchEvents = ["keydown", "beforeinput", "paste", "cut", "drop", "pointerdown"];
+    touchEvents.forEach((type) => host.addEventListener(type, markTouched, true));
+
     let mermaidIdCounter = 0;
     const crepe = new Crepe({
-      root: editorRef.current,
+      root: host,
       defaultValue: activeTab.content,
       features: {
         [Crepe.Feature.CodeMirror]: true,
@@ -106,6 +389,7 @@ export default function App() {
       },
       featureConfigs: {
         [Crepe.Feature.CodeMirror]: {
+          theme: isThemeDark(themeRef.current) ? oneDark : [],
           renderPreview: (language, content, applyPreview) => {
             if (language.toLowerCase() !== "mermaid") return null;
 
@@ -113,7 +397,7 @@ export default function App() {
             loading.className = "mermaid-preview-loading";
             loading.textContent = "Rendering diagram…";
             const id = `markforge-mermaid-${++mermaidIdCounter}`;
-            const dark = themeRef.current !== "light";
+            const dark = isThemeDark(themeRef.current);
 
             void import("mermaid")
               .then(({ default: mermaid }) => {
@@ -152,33 +436,109 @@ export default function App() {
       },
     });
 
+    crepe.on((listener) => {
+      listener.markdownUpdated((_ctx, markdown) => {
+        if (destroyed) return;
+        if (!userTouched) {
+          if (baselineRef.current !== null) baselineRef.current = markdown;
+        } else {
+          const dirty = baselineRef.current === null || markdown !== baselineRef.current;
+          setTabs((prev) =>
+              prev.some((t) => t.path === tabPath && t.isDirty !== dirty)
+                  ? prev.map((t) => (t.path === tabPath ? { ...t, isDirty: dirty } : t))
+                  : prev
+          );
+        }
+        window.clearTimeout(refreshTimer);
+        refreshTimer = window.setTimeout(() => {
+          if (!destroyed) refreshDerived(markdown);
+        }, 80);
+      });
+    });
+
     crepe.create().then(() => {
       if (destroyed) {
         crepe.destroy();
         return;
       }
       crepeRef.current = crepe;
-      updateOutline(activeTab.content);
+      crepePathRef.current = tabPath;
+      refreshDerived(activeTab.content);
+      setActiveHeading(-1);
+      if (scrollRef.current) scrollRef.current.scrollTop = 0;
     });
 
     return () => {
       destroyed = true;
-      if (crepeRef.current) {
-        crepeRef.current.destroy();
+      window.clearTimeout(refreshTimer);
+      touchEvents.forEach((type) => host.removeEventListener(type, markTouched, true));
+      if (crepeRef.current === crepe) {
+        crepe.destroy();
         crepeRef.current = null;
+        crepePathRef.current = null;
       }
     };
   }, [activeTabPath]);
 
-  const syncCurrentEditorContent = (): string => {
+  // Live theme switch: CSS variables repaint the editor; only CodeMirror's syntax palette
+  // needs an explicit swap. The Milkdown instance is never recreated.
+  useEffect(() => {
+    writeStored("markforge.theme", theme);
+    try {
+      crepeRef.current?.editor.action(setCodeMirrorTheme(isThemeDark(theme) ? oneDark : []));
+    } catch {
+      // Editor is mid-rebuild; the next instance reads the theme at creation.
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    writeStored("markforge.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    if (!isResizing) writeStored("markforge.sidebarWidth", String(sidebarWidth));
+  }, [sidebarWidth, isResizing]);
+
+  useEffect(() => {
+    tabBarRef.current
+        ?.querySelector(".tab.active")
+        ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeTabPath, tabs.length]);
+
+  const readEditorMarkdown = (): string => {
     if (!crepeRef.current) return activeTab?.content || "";
     try {
-      const md = crepeRef.current.getMarkdown();
-      updateOutline(md);
-      return md;
+      return crepeRef.current.getMarkdown();
     } catch {
       return activeTab?.content || "";
     }
+  };
+
+  // Copy the live editor's markdown into its tab. Must run before anything swaps the editor.
+  const commitActiveContent = () => {
+    const path = crepePathRef.current;
+    if (!path || !crepeRef.current) return;
+    let markdown: string;
+    try {
+      markdown = crepeRef.current.getMarkdown();
+    } catch {
+      return;
+    }
+    setTabs((prev) =>
+        prev.map((t) => (t.path === path && t.content !== markdown ? { ...t, content: markdown } : t))
+    );
+  };
+
+  const activateTab = (path: string) => {
+    if (path === activeTabPath) return;
+    commitActiveContent();
+    setActiveTabPath(path);
+  };
+
+  const syncCurrentEditorContent = (): string => {
+    const md = readEditorMarkdown();
+    refreshDerived(md);
+    return md;
   };
 
   const refreshWorkspace = async (rootPath: string) => {
@@ -188,29 +548,34 @@ export default function App() {
       });
       setFiles(list);
     } catch (err) {
-      setStatusMessage(`Workspace Error: ${err}`);
+      notify(`Workspace error: ${err}`, "error");
     }
   };
 
   const handleOpenFolder = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") {
-      setWorkspaceRoot(selected);
-      try {
-        await invoke("set_workspace_root", { dirPath: selected });
-      } catch (e) {
-        console.warn("set_workspace_root notice:", e);
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === "string") {
+        setWorkspaceRoot(selected);
+        try {
+          await invoke("set_workspace_root", { dirPath: selected });
+        } catch (e) {
+          console.warn("set_workspace_root notice:", e);
+        }
+        await refreshWorkspace(selected);
+        notify(`Opened workspace: ${selected}`, "success");
       }
-      await refreshWorkspace(selected);
-      setStatusMessage(`Opened workspace: ${selected}`);
+    } catch (err) {
+      notify(`Could not open folder: ${err}`, "error");
     }
   };
 
   // Handler to create a brand new note
-  const handleNewNote = async () => {
+  const handleNewNote = () => {
     const timestamp = Date.now();
     const newName = `note_${timestamp}.md`;
-    const newPath = workspaceRoot ? `${workspaceRoot}\\${newName}` : newName;
+    const sep = workspaceRoot.includes("/") && !workspaceRoot.includes("\\") ? "/" : "\\";
+    const newPath = workspaceRoot ? `${workspaceRoot}${sep}${newName}` : newName;
     const initialContent = "# Untitled Note\n\nStart writing here...";
 
     const newTab: OpenTab = {
@@ -221,36 +586,56 @@ export default function App() {
       isEncrypted: false,
     };
 
+    commitActiveContent();
     setTabs((prev) => [...prev, newTab]);
     setActiveTabPath(newPath);
-    setStatusMessage(`Created new note: ${newName}`);
+    notify(`Created new note: ${newName}`, "success");
+  };
+
+  const openVault = (mode: "encrypt" | "decrypt", targetPath: string) => {
+    setVaultPassword("");
+    setVaultConfirm("");
+    setVaultError("");
+    setShowPassphrase(false);
+    setVaultBusy(false);
+    setVaultModal({ mode, targetPath });
+  };
+
+  const closeVault = () => {
+    setVaultPassword("");
+    setVaultConfirm("");
+    setVaultError("");
+    setShowPassphrase(false);
+    setVaultBusy(false);
+    setVaultModal({ mode: null, targetPath: "" });
   };
 
   const handleOpenFile = async (filePath: string) => {
     const existing = tabs.find((t) => t.path === filePath);
     if (existing) {
-      setActiveTabPath(filePath);
+      activateTab(filePath);
       return;
     }
 
     try {
       const encrypted = await invoke<boolean>("is_encrypted_note", { filePath });
       if (encrypted) {
-        setVaultPassword("");
-        setVaultModal({ mode: "decrypt", targetPath: filePath });
+        openVault("decrypt", filePath);
         return;
       }
 
       const content = await invoke<string>("read_markdown_file", { filePath });
-      const name = filePath.split(/[\\/]/).pop() || filePath;
-      setTabs((prev) => [
-        ...prev,
-        { path: filePath, name, content, isDirty: false, isEncrypted: false },
-      ]);
+      const name = baseName(filePath);
+      commitActiveContent();
+      setTabs((prev) =>
+          prev.some((t) => t.path === filePath)
+              ? prev
+              : [...prev, { path: filePath, name, content, isDirty: false, isEncrypted: false }]
+      );
       setActiveTabPath(filePath);
-      setStatusMessage(`Loaded ${name}`);
+      notify(`Loaded ${name}`, "success");
     } catch (err) {
-      setStatusMessage(`Read Error: ${err}`);
+      notify(`Read error: ${err}`, "error");
     }
   };
 
@@ -281,9 +666,7 @@ export default function App() {
     try {
       if (activeTab.isEncrypted) {
         if (!activeTab.sessionPassword) {
-          setVaultPassword("");
-          setVaultConfirm("");
-          setVaultModal({ mode: "encrypt", targetPath });
+          openVault("encrypt", targetPath);
           return;
         }
         await invoke("save_encrypted_markdown", {
@@ -298,7 +681,8 @@ export default function App() {
         });
       }
 
-      const newName = targetPath.split(/[\\/]/).pop() || targetPath;
+      const newName = baseName(targetPath);
+      baselineRef.current = latestMarkdown;
       setTabs((prev) =>
           prev.map((t) =>
               t.path === activeTab.path
@@ -314,54 +698,64 @@ export default function App() {
       );
       setActiveTabPath(targetPath);
       if (workspaceRoot) await refreshWorkspace(workspaceRoot);
-      setStatusMessage(
-          activeTab.isEncrypted
-              ? `🔒 Saved Encrypted Vault: ${newName}`
-              : `Saved: ${newName}`
-      );
+      flashSaved();
+      if (activeTab.isEncrypted) {
+        notify(`Saved encrypted vault: ${newName}`, "vault");
+      } else {
+        notify(`Saved: ${newName}`, "success");
+      }
     } catch (err) {
-      setStatusMessage(`Save Error: ${err}`);
+      notify(`Save error: ${err}`, "error");
     }
   };
 
   // Vault Encryption / Decryption Handlers
   const handleConfirmVaultAction = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!vaultModal.mode) return;
+    if (!vaultModal.mode || vaultBusy) return;
+    setVaultError("");
 
     if (vaultModal.mode === "decrypt") {
+      setVaultBusy(true);
       try {
         const plaintext = await invoke<string>("read_encrypted_markdown", {
           filePath: vaultModal.targetPath,
           password: vaultPassword,
         });
-        const name =
-            vaultModal.targetPath.split(/[\\/]/).pop() || vaultModal.targetPath;
-        setTabs((prev) => [
-          ...prev,
-          {
-            path: vaultModal.targetPath,
-            name,
-            content: plaintext,
-            isDirty: false,
-            isEncrypted: true,
-            sessionPassword: vaultPassword,
-          },
-        ]);
-        setActiveTabPath(vaultModal.targetPath);
-        setVaultPassword("");
-        setVaultModal({ mode: null, targetPath: "" });
-        setStatusMessage(`🔓 Decrypted vault note: ${name}`);
+        const name = baseName(vaultModal.targetPath);
+        const targetPath = vaultModal.targetPath;
+        const sessionPassword = vaultPassword;
+        commitActiveContent();
+        setTabs((prev) =>
+            prev.some((t) => t.path === targetPath)
+                ? prev
+                : [
+                  ...prev,
+                  {
+                    path: targetPath,
+                    name,
+                    content: plaintext,
+                    isDirty: false,
+                    isEncrypted: true,
+                    sessionPassword,
+                  },
+                ]
+        );
+        setActiveTabPath(targetPath);
+        closeVault();
+        notify(`Decrypted vault note: ${name}`, "vault");
       } catch (err) {
-        setStatusMessage(`❌ ${err}`);
+        setVaultBusy(false);
+        setVaultError(String(err));
+        notify(`${err}`, "error");
       }
     } else if (vaultModal.mode === "encrypt") {
       if (vaultPassword.length < 8) {
-        setStatusMessage("⚠️ Passphrase must be at least 8 characters.");
+        setVaultError("Passphrase must be at least 8 characters.");
         return;
       }
       if (vaultPassword !== vaultConfirm) {
-        setStatusMessage("⚠️ Passphrases do not match.");
+        setVaultError("Passphrases do not match.");
         return;
       }
 
@@ -383,6 +777,7 @@ export default function App() {
         encPath = `${encPath}.enc`;
       }
 
+      setVaultBusy(true);
       try {
         await invoke("save_encrypted_markdown", {
           filePath: encPath,
@@ -398,7 +793,9 @@ export default function App() {
           await invoke("delete_note_file", { filePath: activeTab.path });
         }
 
-        const newName = encPath.split(/[\\/]/).pop() || encPath;
+        const newName = baseName(encPath);
+        const sessionPassword = vaultPassword;
+        baselineRef.current = latestMarkdown;
         setTabs((prev) =>
             prev.map((t) =>
                 t.path === activeTab.path
@@ -408,30 +805,33 @@ export default function App() {
                       content: latestMarkdown,
                       isDirty: false,
                       isEncrypted: true,
-                      sessionPassword: vaultPassword,
+                      sessionPassword,
                     }
                     : t
             )
         );
         setActiveTabPath(encPath);
-        setVaultPassword("");
-        setVaultConfirm("");
-        setVaultModal({ mode: null, targetPath: "" });
+        closeVault();
         if (workspaceRoot) await refreshWorkspace(workspaceRoot);
-        setStatusMessage(`🔒 Encrypted with AES-256-GCM + Argon2id: ${newName}`);
+        notify(`Encrypted with AES-256-GCM + Argon2id: ${newName}`, "vault");
       } catch (err) {
-        setStatusMessage(`Encryption Error: ${err}`);
+        setVaultBusy(false);
+        setVaultError(`Encryption error: ${err}`);
+        notify(`Encryption error: ${err}`, "error");
       }
     }
   };
 
-  const handleCloseTab = (pathToClose: string, e?: React.MouseEvent) => {
-    e?.stopPropagation();
+  const closeTabNow = (pathToClose: string) => {
+    const index = tabs.findIndex((t) => t.path === pathToClose);
+    if (index === -1) return;
     const remaining = tabs.filter((t) => t.path !== pathToClose);
     if (remaining.length === 0) {
+      untitledCounter.current += 1;
+      const name = `Untitled-${untitledCounter.current}.md`;
       const fallback: OpenTab = {
-        path: "Untitled-1.md",
-        name: "Untitled-1.md",
+        path: name,
+        name,
         content: "# New Note\n",
         isDirty: false,
         isEncrypted: false,
@@ -441,9 +841,20 @@ export default function App() {
     } else {
       setTabs(remaining);
       if (activeTabPath === pathToClose) {
-        setActiveTabPath(remaining[remaining.length - 1].path);
+        setActiveTabPath(remaining[Math.min(index, remaining.length - 1)].path);
       }
     }
+  };
+
+  const handleCloseTab = (pathToClose: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const tab = tabs.find((t) => t.path === pathToClose);
+    if (!tab) return;
+    if (tab.isDirty) {
+      setConfirmClosePath(pathToClose);
+      return;
+    }
+    closeTabNow(pathToClose);
   };
 
   const handleExportHtml = async () => {
@@ -451,27 +862,27 @@ export default function App() {
     const latestMarkdown = syncCurrentEditorContent();
     const defaultHtmlName = `${activeTab.name.replace(/(\.md)?(\.enc)?$/i, "")}.html`;
 
-    const targetPath = await save({
-      defaultPath: defaultHtmlName,
-      filters: [{ name: "HTML Document", extensions: ["html"] }],
-    });
-    if (!targetPath) return;
     try {
-      await invoke("authorize_dialog_path", { path: targetPath });
-    } catch (err) {
-      console.warn("authorize_dialog_path error:", err);
-    }
+      const targetPath = await save({
+        defaultPath: defaultHtmlName,
+        filters: [{ name: "HTML Document", extensions: ["html"] }],
+      });
+      if (!targetPath) return;
+      try {
+        await invoke("authorize_dialog_path", { path: targetPath });
+      } catch (err) {
+        console.warn("authorize_dialog_path error:", err);
+      }
 
-    try {
       await invoke("export_to_html", {
         targetPath,
         markdownContent: latestMarkdown,
         title: activeTab.name.replace(/(\.md)?(\.enc)?$/i, ""),
         theme,
       });
-      setStatusMessage(`🌐 Exported sanitized HTML: ${targetPath}`);
+      notify(`Exported sanitized HTML: ${targetPath}`, "success");
     } catch (err) {
-      setStatusMessage(`HTML Export Error: ${err}`);
+      notify(`HTML export error: ${err}`, "error");
     }
   };
 
@@ -479,292 +890,843 @@ export default function App() {
     window.print();
   };
 
-  const runWorkspaceSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!workspaceRoot || !searchQuery.trim()) return;
-    try {
-      const matches = await invoke<SearchMatch[]>("search_workspace", {
-        workspaceRoot,
-        query: searchQuery,
-        caseSensitive,
-      });
-      setSearchResults(matches);
-    } catch (err) {
-      setStatusMessage(`Search Error: ${err}`);
+  const openSearch = () => {
+    setSearchSel(0);
+    setIsSearchOpen(true);
+  };
+
+  const closeSearch = () => {
+    setIsSearchOpen(false);
+    focusEditor();
+  };
+
+  const openPalette = () => {
+    setPaletteQuery("");
+    setPaletteSel(0);
+    setPaletteOpen(true);
+  };
+
+  const closePalette = () => {
+    setPaletteOpen(false);
+    focusEditor();
+  };
+
+  const runMenu = (action: () => void) => {
+    setMenuOpen(false);
+    action();
+  };
+
+  // The overflow menu closes on any click outside it.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!(e.target as HTMLElement).closest(".menu-anchor")) setMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => window.removeEventListener("pointerdown", onPointerDown, true);
+  }, [menuOpen]);
+
+  const requestEncrypt = () => {
+    if (!activeTab) return;
+    openVault("encrypt", activeTab.path);
+  };
+
+  // Workspace search runs as you type (debounced); stale responses are dropped by sequence id.
+  useEffect(() => {
+    if (!isSearchOpen) return;
+    const seq = ++searchSeq.current;
+    if (!workspaceRoot || searchQuery.trim().length < 2) {
+      setSearchResults([]);
+      setSearchState("idle");
+      return;
+    }
+    setSearchState("busy");
+    const timer = window.setTimeout(async () => {
+      try {
+        const matches = await invoke<SearchMatch[]>("search_workspace", {
+          workspaceRoot,
+          query: searchQuery,
+          caseSensitive,
+        });
+        if (seq !== searchSeq.current) return;
+        setSearchResults(matches);
+        setSearchSel(0);
+        setSearchState("done");
+      } catch (err) {
+        if (seq !== searchSeq.current) return;
+        setSearchResults([]);
+        setSearchError(String(err));
+        setSearchState("error");
+      }
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [isSearchOpen, searchQuery, caseSensitive, workspaceRoot]);
+
+  const visibleResults = searchResults.slice(0, MAX_SEARCH_ROWS);
+
+  const openSearchResult = (match: SearchMatch) => {
+    setIsSearchOpen(false);
+    void handleOpenFile(match.file_path);
+  };
+
+  const onSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSearchSel((i) => Math.min(i + 1, visibleResults.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSearchSel((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const match = visibleResults[searchSel];
+      if (match) openSearchResult(match);
     }
   };
 
-  // Global Keyboard Shortcuts
+  // ---- Command palette ----------------------------------------------------
+  const paletteCommands: PaletteCommand[] = paletteOpen
+      ? [
+        { id: "new", group: "Actions", label: "New note", shortcut: "Ctrl+N", icon: <FilePlus2 size={16} />, run: handleNewNote },
+        { id: "open", group: "Actions", label: "Open folder…", keywords: "workspace directory", icon: <FolderOpen size={16} />, run: () => void handleOpenFolder() },
+        { id: "save", group: "Actions", label: "Save note", shortcut: "Ctrl+S", icon: <Save size={16} />, run: () => void handleSaveCurrentTab() },
+        {
+          id: "encrypt",
+          group: "Actions",
+          label: activeTab?.isEncrypted ? "Re-key vault (change passphrase)" : "Lock / encrypt note",
+          keywords: "vault aes argon2 passphrase password zero-knowledge",
+          shortcut: "Ctrl+L",
+          icon: <Lock size={16} />,
+          run: requestEncrypt,
+        },
+        { id: "search", group: "Actions", label: "Search workspace", keywords: "find grep", shortcut: "Ctrl+Shift+F", icon: <Search size={16} />, run: openSearch },
+        { id: "export", group: "Actions", label: "Export HTML", keywords: "sanitized standalone", shortcut: "Ctrl+E", icon: <FileCode2 size={16} />, run: () => void handleExportHtml() },
+        { id: "print", group: "Actions", label: "Print / save as PDF", shortcut: "Ctrl+P", icon: <Printer size={16} />, run: handlePrintPdf },
+        { id: "close", group: "Actions", label: "Close tab", shortcut: "Ctrl+W", icon: <X size={16} />, run: () => handleCloseTab(activeTabPath) },
+        { id: "zen", group: "View", label: zen ? "Exit focus mode" : "Enter focus mode", keywords: "zen distraction free", shortcut: "Ctrl+\\", icon: zen ? <Minimize2 size={16} /> : <Maximize2 size={16} />, run: () => setZen((z) => !z) },
+        { id: "sidebar", group: "View", label: sidebarCollapsed ? "Show sidebar" : "Hide sidebar", keywords: "explorer outline panel", shortcut: "Ctrl+Shift+E", icon: <PanelLeft size={16} />, run: () => setSidebarCollapsed((c) => !c) },
+        ...THEMES.map<PaletteCommand>((t) => ({
+          id: `theme-${t.id}`,
+          group: "Theme",
+          label: `Theme: ${t.label}${t.id === theme ? " (current)" : ""}`,
+          keywords: `color colour appearance ${t.dark ? "dark" : "light"}`,
+          icon: <Palette size={16} />,
+          run: () => switchTheme(t.id),
+        })),
+        ...(paletteQuery.trim()
+            ? files.map<PaletteCommand>((f) => ({
+              id: `file-${f}`,
+              group: "Files",
+              label: baseName(f),
+              keywords: f,
+              icon: baseName(f).toLowerCase().endsWith(".enc") ? <FileLock2 size={16} /> : <FileText size={16} />,
+              run: () => void handleOpenFile(f),
+            }))
+            : []),
+      ]
+      : [];
+
+  const filteredCommands = paletteCommands
+      .filter((c) => matchesQuery(`${c.label} ${c.group} ${c.keywords ?? ""}`, paletteQuery))
+      .slice(0, 40);
+
+  const runCommand = (command: PaletteCommand | undefined) => {
+    if (!command) return;
+    setPaletteOpen(false);
+    command.run();
+  };
+
+  const onPaletteKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setPaletteSel((i) => (filteredCommands.length ? (i + 1) % filteredCommands.length : 0));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setPaletteSel((i) =>
+          filteredCommands.length ? (i - 1 + filteredCommands.length) % filteredCommands.length : 0
+      );
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      runCommand(filteredCommands[paletteSel]);
+    }
+  };
+
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        handleSaveCurrentTab();
-      } else if (e.ctrlKey && e.key.toLowerCase() === "n") {
-        e.preventDefault();
-        handleNewNote();
-      } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "f") {
-        e.preventDefault();
-        setIsSearchOpen((prev) => !prev);
-      } else if (e.ctrlKey && e.key.toLowerCase() === "e") {
-        e.preventDefault();
-        handleExportHtml();
-      } else if (e.ctrlKey && e.key.toLowerCase() === "l") {
-        e.preventDefault();
-        if (activeTab) {
-          setVaultPassword("");
-          setVaultConfirm("");
-          setVaultModal({ mode: "encrypt", targetPath: activeTab.path });
-        }
-      } else if (e.ctrlKey && e.key.toLowerCase() === "p") {
-        e.preventDefault();
-        handlePrintPdf();
-      }
+    document
+        .querySelector(".spot-item.selected")
+        ?.scrollIntoView({ block: "nearest" });
+  }, [paletteSel, searchSel, paletteOpen, isSearchOpen]);
+
+  // ---- Outline navigation -------------------------------------------------
+  const jumpToHeading = (domIndex: number) => {
+    const target = editorRef.current?.querySelectorAll<HTMLElement>(HEADING_SELECTOR)[domIndex];
+    if (!target) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    // Hold the clicked heading as active while the smooth scroll runs; a heading near the end
+    // of a short note can never reach the top, so the scroll-spy must not override the click.
+    spyLockUntil.current = performance.now() + 900;
+    target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    setActiveHeading(domIndex);
+  };
+
+  const onEditorScroll = () => {
+    if (spyFrame.current || performance.now() < spyLockUntil.current) return;
+    spyFrame.current = window.requestAnimationFrame(() => {
+      spyFrame.current = 0;
+      const container = scrollRef.current;
+      const root = editorRef.current;
+      if (!container || !root) return;
+      const threshold = container.getBoundingClientRect().top + 96;
+      let current = -1;
+      root.querySelectorAll<HTMLElement>(HEADING_SELECTOR).forEach((el, index) => {
+        if (el.getBoundingClientRect().top <= threshold) current = index;
+      });
+      setActiveHeading(current);
+    });
+  };
+
+  // ---- Sidebar resize -----------------------------------------------------
+  const onResizeStart = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    setIsResizing(true);
+    const onMove = (ev: PointerEvent) => {
+      setSidebarWidth(clamp(startWidth + ev.clientX - startX, SIDEBAR_MIN, SIDEBAR_MAX));
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  });
+    const onUp = () => {
+      setIsResizing(false);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const onResizeKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      const delta = e.key === "ArrowLeft" ? -16 : 16;
+      setSidebarWidth((w) => clamp(w + delta, SIDEBAR_MIN, SIDEBAR_MAX));
+    }
+  };
+
+  // Global Keyboard Shortcuts. Registered once in the capture phase so app shortcuts win over
+  // the editor's own bindings (e.g. Ctrl+E); the ref always points at the latest handler.
+  const keyHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keyHandlerRef.current = (e: KeyboardEvent) => {
+    const key = e.key.toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+
+    if (e.key === "Escape") {
+      if (menuOpen) setMenuOpen(false);
+      else if (paletteOpen) closePalette();
+      else if (isSearchOpen) closeSearch();
+      else if (confirmClosePath !== null) setConfirmClosePath(null);
+      else if (vaultModal.mode) closeVault();
+      else if (zen) setZen(false);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    if (anyModalOpen) {
+      // Only let a modal's own shortcut toggle it; everything else stays with the modal.
+      if (mod && !e.shiftKey && key === "k" && paletteOpen) closePalette();
+      else if (mod && e.shiftKey && key === "f" && isSearchOpen) closeSearch();
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    if (e.key === "F11") {
+      setZen((z) => !z);
+    } else if (!mod) {
+      return;
+    } else if (e.shiftKey && key === "f") {
+      openSearch();
+    } else if (e.shiftKey && key === "e") {
+      setSidebarCollapsed((c) => !c);
+    } else if (e.shiftKey) {
+      return;
+    } else if (key === "k") {
+      openPalette();
+    } else if (key === "s") {
+      void handleSaveCurrentTab();
+    } else if (key === "n") {
+      handleNewNote();
+    } else if (key === "e") {
+      void handleExportHtml();
+    } else if (key === "l") {
+      requestEncrypt();
+    } else if (key === "p") {
+      handlePrintPdf();
+    } else if (key === "w") {
+      handleCloseTab(activeTabPath);
+    } else if (key === "\\") {
+      setZen((z) => !z);
+    } else {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => keyHandlerRef.current(e);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
+
+  const strength = scorePassphrase(vaultPassword);
+  const confirmTab = tabs.find((t) => t.path === confirmClosePath);
+  const canShredOriginal =
+      vaultModal.mode === "encrypt" &&
+      !!activeTab &&
+      !activeTab.isEncrypted &&
+      isDiskPath(activeTab.path);
+
+  const shellClass = [
+    "app-shell",
+    `theme-${theme}`,
+    IS_NATIVE ? "is-native" : "",
+    zen ? "zen" : "",
+    sidebarCollapsed ? "sidebar-collapsed" : "",
+    isResizing ? "is-resizing" : "",
+  ]
+      .filter(Boolean)
+      .join(" ");
+
+  let lastGroup = "";
 
   return (
-      <div className={`app-shell theme-${theme}`}>
-        {/* Top Header / Security & Export Toolbar */}
-        <header className="top-toolbar">
-          <div className="brand-group">
-            <span className="brand-logo">⚡ MarkForge</span>
-            <button className="btn-action" onClick={handleOpenFolder}>
-              📂 Open Folder
-            </button>
-            <button className="btn-action" onClick={handleNewNote}>
-              📄 New Note (Ctrl+N)
-            </button>
-            <button className="btn-action" onClick={handleSaveCurrentTab}>
-              💾 Save (Ctrl+S)
-            </button>
-            <button
-                className="btn-action btn-vault"
-                onClick={() => {
-                  if (!activeTab) return;
-                  setVaultPassword("");
-                  setVaultConfirm("");
-                  setVaultModal({ mode: "encrypt", targetPath: activeTab.path });
-                }}
-                title="Zero-Knowledge AES-256-GCM + Argon2id Encryption (Ctrl+L)"
-            >
-              {activeTab?.isEncrypted ? "🔒 Re-Key Vault" : "🛡️ Encrypt Note (Ctrl+L)"}
-            </button>
+      <div
+          className={shellClass}
+          style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+      >
+        {/* Top Header / Command Toolbar */}
+        <header className="top-toolbar" inert={anyModalOpen || zen}>
+          <button
+              className={`tb-btn tb-icon ${sidebarCollapsed ? "" : "is-on"}`}
+              onClick={() => setSidebarCollapsed((c) => !c)}
+              title="Toggle sidebar (Ctrl+Shift+E)"
+              aria-label="Toggle sidebar"
+              aria-pressed={!sidebarCollapsed}
+          >
+            <PanelLeft size={16} />
+          </button>
+
+          <div className="brand">
+            <span className="brand-mark">
+              <Zap size={14} strokeWidth={2.4} />
+            </span>
+            <span className="brand-name">MarkForge</span>
           </div>
 
-          <div className="toolbar-right">
-            <button
-                className="btn-action"
-                onClick={() => setIsSearchOpen(true)}
-                title="Search Workspace (Ctrl+Shift+F)"
-            >
-              🔍 Search
-            </button>
-            <button
-                className="btn-action"
-                onClick={handleExportHtml}
-                title="Export Sanitized HTML (Ctrl+E)"
-            >
-              🌐 Export HTML
-            </button>
-            <button
-                className="btn-action"
-                onClick={handlePrintPdf}
-                title="Print or Save as PDF (Ctrl+P)"
-            >
-              📄 Print / PDF
-            </button>
+          <div className="tb-spacer" />
 
-            <select
-                className="theme-select"
-                value={theme}
-                onChange={(e) => setTheme(e.target.value as ThemeName)}
+          <button className="palette-trigger" onClick={openPalette} title="Command palette (Ctrl+K)">
+            <Command size={14} />
+            <span className="pt-label">Search commands and files…</span>
+            <span className="kbd">Ctrl+K</span>
+          </button>
+
+          <div className="tb-spacer" />
+
+          <div className="tb-actions">
+            <button
+                className={`tb-btn tb-icon ${justSaved ? "is-saved" : activeTab?.isDirty ? "is-dirty" : ""}`}
+                onClick={handleSaveCurrentTab}
+                title={activeTab?.isDirty ? "Save changes (Ctrl+S)" : "Save (Ctrl+S)"}
+                aria-label="Save"
             >
-              <option value="dark">Cyber Dark (Mica)</option>
-              <option value="nord">Nord Frost</option>
-              <option value="light">Clean Light</option>
-              <option value="solarized">Solarized Warm</option>
-            </select>
+              {justSaved ? <Check size={16} /> : <Save size={16} />}
+            </button>
+            <button
+                className="tb-btn tb-icon"
+                onClick={openSearch}
+                title="Search workspace (Ctrl+Shift+F)"
+                aria-label="Search workspace"
+            >
+              <Search size={16} />
+            </button>
+            <button
+                className="tb-btn tb-icon"
+                onClick={() => setZen(true)}
+                title="Focus mode (Ctrl+\ or F11)"
+                aria-label="Enter focus mode"
+            >
+              <Maximize2 size={16} />
+            </button>
+            <div className="menu-anchor">
+              <button
+                  className={`tb-btn tb-icon ${menuOpen ? "is-on" : ""}`}
+                  onClick={() => setMenuOpen((o) => !o)}
+                  title="More actions"
+                  aria-label="More actions"
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+              >
+                <Ellipsis size={16} />
+              </button>
+              {menuOpen && (
+                  <div className="menu" role="menu">
+                    <button className="menu-item" role="menuitem" onClick={() => runMenu(() => void handleOpenFolder())}>
+                      <FolderOpen size={15} />
+                      <span className="mi-label">Open folder…</span>
+                    </button>
+                    <button className="menu-item" role="menuitem" onClick={() => runMenu(handleNewNote)}>
+                      <FilePlus2 size={15} />
+                      <span className="mi-label">New note</span>
+                      <span className="kbd">Ctrl+N</span>
+                    </button>
+                    <button className="menu-item" role="menuitem" onClick={() => runMenu(() => void handleExportHtml())}>
+                      <FileCode2 size={15} />
+                      <span className="mi-label">Export sanitized HTML</span>
+                      <span className="kbd">Ctrl+E</span>
+                    </button>
+                    <button className="menu-item" role="menuitem" onClick={() => runMenu(handlePrintPdf)}>
+                      <Printer size={15} />
+                      <span className="mi-label">Print / save as PDF</span>
+                      <span className="kbd">Ctrl+P</span>
+                    </button>
+                  </div>
+              )}
+            </div>
+          </div>
+
+          <button
+              className="tb-btn tb-vault"
+              onClick={requestEncrypt}
+              title="Zero-Knowledge AES-256-GCM + Argon2id Encryption (Ctrl+L)"
+          >
+            {activeTab?.isEncrypted ? <LockKeyhole size={15} /> : <Lock size={15} />}
+            <span className="tb-label">{activeTab?.isEncrypted ? "Re-key" : "Encrypt"}</span>
+          </button>
+
+          <div className="theme-swatches" role="radiogroup" aria-label="Theme">
+            {THEMES.map((t) => (
+                <button
+                    key={t.id}
+                    className="swatch"
+                    role="radio"
+                    aria-checked={theme === t.id}
+                    aria-label={t.label}
+                    title={t.label}
+                    style={{ "--sw-a": t.swatch[0], "--sw-b": t.swatch[1] } as React.CSSProperties}
+                    onClick={(e) => {
+                      const box = e.currentTarget.getBoundingClientRect();
+                      switchTheme(t.id, { x: box.left + box.width / 2, y: box.top + box.height / 2 });
+                    }}
+                />
+            ))}
           </div>
         </header>
 
         {/* Main Content Split */}
-        <div className="workspace-body">
+        <div className="workspace-body" inert={anyModalOpen}>
           {/* Left Sidebar: Files & Live Outline */}
-          <aside className="sidebar">
-            <div className="sidebar-section">
-              <div className="sidebar-title flex items-center justify-between">
-                <span>EXPLORER</span>
-                <button
-                    onClick={handleNewNote}
-                    className="text-xs px-1.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded"
-                    title="New Note"
-                >
-                  + New
+          <aside className="sidebar" inert={sidebarCollapsed || zen}>
+            <div className="side-section">
+              <div className="side-head">
+                <span className="side-title">Explorer</span>
+                {files.length > 0 && <span className="side-count">{files.length}</span>}
+                <button className="icon-btn" onClick={handleOpenFolder} title="Open folder" aria-label="Open folder">
+                  <FolderOpen size={14} />
+                </button>
+                <button className="icon-btn" onClick={handleNewNote} title="New note (Ctrl+N)" aria-label="New note">
+                  <Plus size={15} />
                 </button>
               </div>
-              <div className="file-list">
-                {files.length === 0 ? (
-                    <div className="empty-hint">No folder opened</div>
+              <div className="side-list">
+                {!workspaceRoot ? (
+                    <div className="empty-state">
+                      <div className="empty-art">
+                        <FolderOpen size={24} />
+                      </div>
+                      <div className="empty-title">No folder open</div>
+                      <div className="empty-text">
+                        Open a folder to browse, search and encrypt the notes inside it.
+                      </div>
+                      <button className="btn btn-primary btn-sm" onClick={handleOpenFolder}>
+                        <FolderOpen size={14} />
+                        Open folder
+                      </button>
+                    </div>
+                ) : files.length === 0 ? (
+                    <div className="empty-hint">No Markdown notes in this folder yet.</div>
                 ) : (
-                    files.map((f) => {
-                      const shortName = f.split(/[\\/]/).pop() || f;
+                    files.map((f, i) => {
+                      const shortName = baseName(f);
                       const isEnc = shortName.toLowerCase().endsWith(".enc");
                       return (
-                          <div
+                          <button
                               key={f}
-                              className={`file-item ${
-                                  activeTabPath === f ? "active" : ""
+                              className={`file-item ${activeTabPath === f ? "active" : ""} ${
+                                  isEnc ? "is-enc" : ""
                               }`}
+                              style={{ "--i": i } as React.CSSProperties}
                               onClick={() => handleOpenFile(f)}
+                              title={f}
                           >
-                            <span>{isEnc ? "🔒" : "📝"}</span>
-                            <span className="file-name">{shortName}</span>
-                          </div>
+                            <span className="fi-icon">
+                              {isEnc ? <FileLock2 size={15} /> : <FileText size={15} />}
+                            </span>
+                            <span className="fi-name">{shortName}</span>
+                            {isEnc && <span className="enc-badge">ENC</span>}
+                          </button>
                       );
                     })
                 )}
               </div>
             </div>
 
-            <div className="sidebar-section outline-section">
-              <div className="sidebar-title">DOCUMENT OUTLINE</div>
-              <div className="outline-list">
-                {outline.map((h, i) => (
-                    <div
-                        key={i}
-                        className={`outline-item level-${h.level}`}
-                    >
-                      {h.text}
-                    </div>
-                ))}
+            <div className="side-section">
+              <div className="side-head">
+                <span className="side-title">Outline</span>
+              </div>
+              <div className="side-list">
+                {outline.length === 0 ? (
+                    <div className="empty-hint">Headings you write appear here.</div>
+                ) : (
+                    outline.map((h) => (
+                        <button
+                            key={h.domIndex}
+                            className={`outline-item level-${h.level} ${
+                                activeHeading === h.domIndex ? "active" : ""
+                            }`}
+                            onClick={() => jumpToHeading(h.domIndex)}
+                            title={h.text}
+                        >
+                          <span className="oi-text">{h.text}</span>
+                        </button>
+                    ))
+                )}
               </div>
             </div>
+
+            <div
+                className="sidebar-resizer"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize sidebar"
+                aria-valuemin={SIDEBAR_MIN}
+                aria-valuemax={SIDEBAR_MAX}
+                aria-valuenow={sidebarWidth}
+                tabIndex={0}
+                onPointerDown={onResizeStart}
+                onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT)}
+                onKeyDown={onResizeKeyDown}
+            />
           </aside>
 
           {/* Center Editor Region */}
           <main className="editor-area">
             {/* Multi-Tab Bar */}
-            <div className="tab-bar">
+            <div
+                className="tab-bar"
+                role="tablist"
+                ref={tabBarRef}
+                inert={zen}
+                onWheel={(e) => {
+                  if (e.deltaY !== 0) e.currentTarget.scrollLeft += e.deltaY;
+                }}
+            >
               {tabs.map((tab) => (
                   <div
                       key={tab.path}
-                      className={`tab-pill ${
-                          tab.path === activeTabPath ? "active" : ""
+                      role="tab"
+                      tabIndex={0}
+                      aria-selected={tab.path === activeTabPath}
+                      className={`tab ${tab.path === activeTabPath ? "active" : ""} ${
+                          tab.isDirty ? "dirty" : ""
                       }`}
-                      onClick={() => {
-                        const updated = syncCurrentEditorContent();
-                        setTabs((prev) =>
-                            prev.map((t) =>
-                                t.path === activeTabPath ? { ...t, content: updated } : t
-                            )
-                        );
-                        setActiveTabPath(tab.path);
+                      title={tab.path}
+                      onClick={() => activateTab(tab.path)}
+                      onAuxClick={(e) => {
+                        if (e.button === 1) handleCloseTab(tab.path, e);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                          e.preventDefault();
+                          activateTab(tab.path);
+                        }
                       }}
                   >
                     {tab.isEncrypted && (
-                        <span className="lock-badge" title="AES-256-GCM Encrypted">
-                    🔒
-                  </span>
+                        <span className="tab-lock" title="AES-256-GCM encrypted — decrypted for this session">
+                          <LockOpen size={13} />
+                        </span>
                     )}
-                    <span>{tab.name}</span>
-                    <button
-                        className="tab-close"
-                        onClick={(e) => handleCloseTab(tab.path, e)}
-                    >
-                      ×
-                    </button>
+                    <span className="tab-name">{tab.name}</span>
+                    <span className="tab-end">
+                      {tab.isDirty && <span className="tab-dirty" title="Unsaved changes" />}
+                      <button
+                          className="tab-close"
+                          onClick={(e) => handleCloseTab(tab.path, e)}
+                          aria-label={`Close ${tab.name}`}
+                      >
+                        <X size={13} />
+                      </button>
+                    </span>
                   </div>
               ))}
+              <button className="icon-btn tab-new" onClick={handleNewNote} title="New note (Ctrl+N)" aria-label="New note">
+                <Plus size={15} />
+              </button>
             </div>
 
+            {zen && (
+                <button className="zen-exit" onClick={() => setZen(false)}>
+                  <Minimize2 size={13} />
+                  Exit focus
+                  <span className="kbd">Esc</span>
+                </button>
+            )}
+
             {/* Milkdown WYSIWYG Surface */}
-            <div className="editor-scroll-container">
+            <div className="editor-scroll" ref={scrollRef} onScroll={onEditorScroll}>
               <div ref={editorRef} className="milkdown-surface" />
             </div>
           </main>
         </div>
 
         {/* Status Bar */}
-        <footer className="status-bar">
-          <span>{statusMessage}</span>
-          <span>
-          {activeTab?.isEncrypted
-              ? "🛡️ Zero-Knowledge Vault (AES-256-GCM / Argon2id 64MiB)"
-              : "Standard Markdown"}
-        </span>
+        <footer className="status-bar" inert={anyModalOpen || zen}>
+          <div key={status.id} className={`status-msg tone-${status.tone}`} role="status" aria-live="polite">
+            <i className="status-dot" />
+            <span title={status.message}>{status.message}</span>
+          </div>
+          <div className="status-stats">
+            <span><b>{stats.words.toLocaleString()}</b> words</span>
+            <span className="stat-optional"><b>{stats.chars.toLocaleString()}</b> chars</span>
+            <span className="stat-optional"><b>{stats.lines.toLocaleString()}</b> lines</span>
+            <span>{stats.minutes === 0 ? "—" : <>~<b>{stats.minutes}</b> min read</>}</span>
+          </div>
+          {activeTab?.isEncrypted ? (
+              <span className="posture is-vault" title="Zero-Knowledge Vault (AES-256-GCM / Argon2id 64MiB)">
+                <ShieldCheck size={12} />
+                AES-256-GCM · Argon2id
+              </span>
+          ) : (
+              <span className="posture" title="This note is stored as plain Markdown on disk">
+                <FileText size={12} />
+                Plaintext
+              </span>
+          )}
         </footer>
+
+        {/* Command Palette (Ctrl+K) */}
+        {paletteOpen && (
+            <div
+                className="modal-backdrop is-spotlight"
+                onMouseDown={(e) => {
+                  if (e.target === e.currentTarget) closePalette();
+                }}
+            >
+              <div className="modal spotlight" role="dialog" aria-modal="true" aria-label="Command palette">
+                <div className="spot-input-row">
+                  <Command size={17} />
+                  <input
+                      className="spot-input"
+                      placeholder="Type a command, theme or file name…"
+                      value={paletteQuery}
+                      onChange={(e) => {
+                        setPaletteQuery(e.target.value);
+                        setPaletteSel(0);
+                      }}
+                      onKeyDown={onPaletteKeyDown}
+                      autoFocus
+                      spellCheck={false}
+                  />
+                  <span className="kbd">Esc</span>
+                </div>
+                <div className="spot-list" role="listbox">
+                  {filteredCommands.length === 0 ? (
+                      <div className="spot-empty">No matching command.</div>
+                  ) : (
+                      filteredCommands.map((command, index) => {
+                        const header = command.group !== lastGroup ? command.group : null;
+                        lastGroup = command.group;
+                        return (
+                            <React.Fragment key={command.id}>
+                              {header && <div className="spot-group">{header}</div>}
+                              <button
+                                  role="option"
+                                  aria-selected={index === paletteSel}
+                                  className={`spot-item ${index === paletteSel ? "selected" : ""}`}
+                                  onMouseMove={() => setPaletteSel(index)}
+                                  onClick={() => runCommand(command)}
+                              >
+                                <span className="si-icon">{command.icon}</span>
+                                <span className="si-main">
+                                  <div className="si-label">{command.label}</div>
+                                </span>
+                                {command.shortcut && <span className="kbd">{command.shortcut}</span>}
+                              </button>
+                            </React.Fragment>
+                        );
+                      })
+                  )}
+                </div>
+                <div className="spot-foot">
+                  <span><span className="kbd">↑</span><span className="kbd">↓</span> navigate</span>
+                  <span><span className="kbd">Enter</span> run</span>
+                  <span className="sf-right">Type to find files in the open folder</span>
+                </div>
+              </div>
+            </div>
+        )}
 
         {/* Zero-Knowledge Encryption / Decryption Modal */}
         {vaultModal.mode && (
-            <div className="modal-backdrop">
-              <form className="vault-modal" onSubmit={handleConfirmVaultAction}>
-                <h3>
-                  {vaultModal.mode === "encrypt"
-                      ? "🔒 Encrypt Note with Zero-Knowledge Vault"
-                      : "🔓 Unlock Encrypted Note"}
-                </h3>
-                <p className="vault-subtitle">
-                  {vaultModal.mode === "encrypt"
-                      ? "Derived via Argon2id (64 MiB RAM) & encrypted with AES-256-GCM. Without this passphrase, recovery is mathematically impossible."
-                      : `Enter passphrase to decrypt: ${vaultModal.targetPath
-                          .split(/[\\/]/)
-                          .pop()}`}
-                </p>
+            <div
+                className="modal-backdrop"
+                onMouseDown={(e) => {
+                  if (e.target === e.currentTarget && !vaultBusy) closeVault();
+                }}
+            >
+              <form
+                  className="modal"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="vault-title"
+                  onSubmit={handleConfirmVaultAction}
+              >
+                <div className="modal-body">
+                  <div className="modal-head">
+                    <div className="modal-icon">
+                      {vaultModal.mode === "encrypt" ? <Lock size={18} /> : <LockOpen size={18} />}
+                    </div>
+                    <div>
+                      <h3 className="modal-title" id="vault-title">
+                        {vaultModal.mode === "encrypt"
+                            ? "Encrypt note with Zero-Knowledge Vault"
+                            : "Unlock encrypted note"}
+                      </h3>
+                      <p className="modal-sub">
+                        {vaultModal.mode === "encrypt"
+                            ? "Derived via Argon2id (64 MiB RAM) & encrypted with AES-256-GCM. Without this passphrase, recovery is mathematically impossible."
+                            : `Enter passphrase to decrypt: ${baseName(vaultModal.targetPath)}`}
+                      </p>
+                    </div>
+                  </div>
 
-                <input
-                    type="password"
-                    className="vault-input"
-                    placeholder="Enter passphrase (min 8 chars)..."
-                    value={vaultPassword}
-                    onChange={(e) => setVaultPassword(e.target.value)}
-                    autoFocus
-                    required
-                />
-
-                {vaultModal.mode === "encrypt" && (
-                    <>
+                  <div className="field">
+                    <label className="field-label" htmlFor="vault-pass">Passphrase</label>
+                    <div className="input-wrap">
                       <input
-                          type="password"
-                          className="vault-input"
-                          placeholder="Confirm passphrase..."
-                          value={vaultConfirm}
-                          onChange={(e) => setVaultConfirm(e.target.value)}
+                          id="vault-pass"
+                          type={showPassphrase ? "text" : "password"}
+                          className="text-input"
+                          placeholder={
+                            vaultModal.mode === "encrypt"
+                                ? "At least 8 characters"
+                                : "Enter passphrase"
+                          }
+                          value={vaultPassword}
+                          onChange={(e) => {
+                            setVaultPassword(e.target.value);
+                            setVaultError("");
+                          }}
+                          autoComplete="off"
+                          spellCheck={false}
+                          autoFocus
                           required
                       />
-                      <label className="shred-checkbox">
-                        <input
-                            type="checkbox"
-                            checked={shredOriginal}
-                            onChange={(e) => setShredOriginal(e.target.checked)}
-                        />
-                        Overwrite & delete original unencrypted .md file (best-effort on SSDs)
-                      </label>
-                      <small style={{ color: "#8b949e", fontSize: "0.76rem", display: "block", marginTop: "2px", marginBottom: "6px" }}>
-                        (Note: Single-pass overwrite cannot guarantee physical block erasure on SSDs, NVMe, or copy-on-write filesystems due to wear leveling.)
-                      </small>
-                    </>
-                )}
+                      <button
+                          type="button"
+                          className="icon-btn"
+                          onClick={() => setShowPassphrase((s) => !s)}
+                          aria-label={showPassphrase ? "Hide passphrase" : "Show passphrase"}
+                          title={showPassphrase ? "Hide passphrase" : "Show passphrase"}
+                      >
+                        {showPassphrase ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                    </div>
+                    {vaultModal.mode === "encrypt" && (
+                        <div className="strength" data-score={strength}>
+                          <div className="strength-bars" aria-hidden="true">
+                            <i /><i /><i /><i />
+                          </div>
+                          <span className="strength-label">
+                            {strength === 0 ? "Strength" : STRENGTH_LABELS[strength]}
+                          </span>
+                        </div>
+                    )}
+                  </div>
 
-                <div className="modal-actions">
-                  <button
-                      type="button"
-                      className="btn-cancel"
-                      onClick={() => {
-                        setVaultPassword("");
-                        setVaultConfirm("");
-                        setVaultModal({ mode: null, targetPath: "" });
-                      }}
-                  >
-                    Cancel
-                  </button>
-                  <button type="submit" className="btn-confirm">
-                    {vaultModal.mode === "encrypt"
-                        ? "Encrypt & Save"
-                        : "Decrypt & Open"}
-                  </button>
+                  {vaultModal.mode === "encrypt" && (
+                      <>
+                        <div className="field">
+                          <label className="field-label" htmlFor="vault-confirm">Confirm passphrase</label>
+                          <div className="input-wrap">
+                            <input
+                                id="vault-confirm"
+                                type={showPassphrase ? "text" : "password"}
+                                className="text-input"
+                                placeholder="Type it again"
+                                value={vaultConfirm}
+                                onChange={(e) => {
+                                  setVaultConfirm(e.target.value);
+                                  setVaultError("");
+                                }}
+                                autoComplete="off"
+                                spellCheck={false}
+                                required
+                            />
+                          </div>
+                          {vaultConfirm.length > 0 &&
+                              (vaultConfirm === vaultPassword ? (
+                                  <div className="field-hint is-ok">
+                                    <Check size={13} /> Passphrases match
+                                  </div>
+                              ) : (
+                                  <div className="field-hint is-bad">
+                                    <X size={13} /> Passphrases do not match yet
+                                  </div>
+                              ))}
+                        </div>
+
+                        {canShredOriginal && (
+                            <>
+                              <label className="check-row">
+                                <input
+                                    type="checkbox"
+                                    checked={shredOriginal}
+                                    onChange={(e) => setShredOriginal(e.target.checked)}
+                                />
+                                <span>Overwrite &amp; delete original unencrypted .md file (best-effort on SSDs)</span>
+                              </label>
+                              <p className="fine-print">
+                                Single-pass overwrite cannot guarantee physical block erasure on SSDs, NVMe,
+                                or copy-on-write filesystems due to wear leveling.
+                              </p>
+                            </>
+                        )}
+                      </>
+                  )}
+
+                  {vaultError && (
+                      <div className="modal-error" role="alert">
+                        <CircleAlert size={15} />
+                        <span>{vaultError}</span>
+                      </div>
+                  )}
+
+                  <div className="modal-actions">
+                    <button type="button" className="btn" onClick={closeVault} disabled={vaultBusy}>
+                      Cancel
+                    </button>
+                    <button type="submit" className="btn btn-primary" disabled={vaultBusy}>
+                      {vaultBusy
+                          ? "Deriving key…"
+                          : vaultModal.mode === "encrypt"
+                              ? "Encrypt & Save"
+                              : "Decrypt & Open"}
+                    </button>
+                  </div>
                 </div>
               </form>
             </div>
@@ -772,53 +1734,124 @@ export default function App() {
 
         {/* Workspace Search Modal (Ctrl+Shift+F) */}
         {isSearchOpen && (
-            <div className="modal-backdrop">
-              <div className="vault-modal search-modal">
-                <h3>🔍 Search Workspace</h3>
-                <form onSubmit={runWorkspaceSearch} className="search-bar-row">
+            <div
+                className="modal-backdrop is-spotlight"
+                onMouseDown={(e) => {
+                  if (e.target === e.currentTarget) closeSearch();
+                }}
+            >
+              <div className="modal spotlight" role="dialog" aria-modal="true" aria-label="Search workspace">
+                <div className="spot-input-row">
+                  <Search size={17} />
                   <input
                       type="text"
-                      className="vault-input"
-                      placeholder="Search across all plaintext notes..."
+                      className="spot-input"
+                      placeholder="Search across all plaintext notes…"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
+                      onKeyDown={onSearchKeyDown}
                       autoFocus
+                      spellCheck={false}
                   />
-                  <button type="submit" className="btn-confirm">
-                    Find
-                  </button>
                   <button
                       type="button"
-                      className="btn-cancel"
-                      onClick={() => setIsSearchOpen(false)}
+                      className="toggle-chip"
+                      aria-pressed={caseSensitive}
+                      onClick={() => setCaseSensitive((c) => !c)}
+                      title="Case sensitive"
                   >
-                    Close
+                    <CaseSensitive size={15} />
                   </button>
-                </form>
-                <label className="shred-checkbox">
-                  <input
-                      type="checkbox"
-                      checked={caseSensitive}
-                      onChange={(e) => setCaseSensitive(e.target.checked)}
-                  />
-                  Case Sensitive (Encrypted `.enc` vaults are automatically excluded)
-                </label>
-                <div className="search-results-list">
-                  {searchResults.map((m, idx) => (
-                      <div
-                          key={idx}
-                          className="search-result-item"
-                          onClick={() => {
-                            setIsSearchOpen(false);
-                            handleOpenFile(m.file_path);
-                          }}
-                      >
-                        <div className="search-file">
-                          {m.file_path.split(/[\\/]/).pop()}:{m.line_number}
-                        </div>
-                        <div className="search-snippet">{m.snippet}</div>
+                  <span className="kbd">Esc</span>
+                </div>
+                <div className="spot-list" role="listbox">
+                  {!workspaceRoot ? (
+                      <div className="spot-empty">Open a folder first — search runs across its notes.</div>
+                  ) : searchState === "error" ? (
+                      <div className="spot-empty" style={{ color: "var(--danger)" }}>
+                        Search error: {searchError}
                       </div>
-                  ))}
+                  ) : searchQuery.trim().length < 2 ? (
+                      <div className="spot-empty">Type at least 2 characters.</div>
+                  ) : searchState === "busy" && visibleResults.length === 0 ? (
+                      <div className="spot-empty">Searching…</div>
+                  ) : visibleResults.length === 0 ? (
+                      <div className="spot-empty">No matches in plaintext notes.</div>
+                  ) : (
+                      visibleResults.map((m, idx) => (
+                          <button
+                              key={`${m.file_path}:${m.line_number}:${idx}`}
+                              role="option"
+                              aria-selected={idx === searchSel}
+                              className={`spot-item ${idx === searchSel ? "selected" : ""}`}
+                              onMouseMove={() => setSearchSel(idx)}
+                              onClick={() => openSearchResult(m)}
+                          >
+                            <span className="si-icon"><FileText size={16} /></span>
+                            <span className="si-main">
+                              <div className="si-label si-file">
+                                {baseName(m.file_path)}:{m.line_number}
+                              </div>
+                              <div className="si-sub">
+                                <Highlighted text={m.snippet} query={searchQuery} caseSensitive={caseSensitive} />
+                              </div>
+                            </span>
+                          </button>
+                      ))
+                  )}
+                </div>
+                <div className="spot-foot">
+                  <span><span className="kbd">↑</span><span className="kbd">↓</span> navigate</span>
+                  <span><span className="kbd">Enter</span> open <CornerDownLeft size={12} /></span>
+                  <span className="sf-right">
+                    {searchResults.length > MAX_SEARCH_ROWS
+                        ? `Showing first ${MAX_SEARCH_ROWS} of ${searchResults.length} · `
+                        : searchResults.length > 0
+                            ? `${searchResults.length} match${searchResults.length === 1 ? "" : "es"} · `
+                            : ""}
+                    Encrypted .enc vaults are excluded
+                  </span>
+                </div>
+              </div>
+            </div>
+        )}
+
+        {/* Unsaved-changes guard */}
+        {confirmTab && (
+            <div
+                className="modal-backdrop"
+                onMouseDown={(e) => {
+                  if (e.target === e.currentTarget) setConfirmClosePath(null);
+                }}
+            >
+              <div className="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+                <div className="modal-body">
+                  <div className="modal-head">
+                    <div className="modal-icon is-danger">
+                      <TriangleAlert size={18} />
+                    </div>
+                    <div>
+                      <h3 className="modal-title" id="confirm-title">Discard unsaved changes?</h3>
+                      <p className="modal-sub">
+                        “{confirmTab.name}” has edits that were never saved. Closing the tab loses them.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="modal-actions">
+                    <button className="btn" onClick={() => setConfirmClosePath(null)} autoFocus>
+                      Keep editing
+                    </button>
+                    <button
+                        className="btn btn-danger"
+                        onClick={() => {
+                          const path = confirmTab.path;
+                          setConfirmClosePath(null);
+                          closeTabNow(path);
+                        }}
+                    >
+                      Discard &amp; close
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

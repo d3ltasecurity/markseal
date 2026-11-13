@@ -606,10 +606,11 @@ pub mod commands {
         let safe_title = escape_html_entities(&title);
 
         let (bg, text, card_bg, border, accent) = match theme.as_str() {
-            "nord" => ("#2e3440", "#d8dee9", "#3b4252", "#4c566a", "#88c0d0"),
-            "light" => ("#ffffff", "#24292f", "#f6f8fa", "#d0d7de", "#0969da"),
-            "solarized" => ("#fdf6e3", "#586e75", "#eee8d5", "#93a1a1", "#268bd2"),
-            _ => ("#0d1117", "#e6edf3", "#161b22", "#30363d", "#58a6ff"),
+            "ivory" => ("#f1e2c8", "#22302a", "#f9ebd7", "#d9c9a9", "#046a38"),
+            "neon" => ("#080808", "#ededed", "#111111", "#2a2a2a", "#d4ff3f"),
+            "nordic" => ("#1c2028", "#d8dee9", "#232832", "#3a4252", "#88c0d0"),
+            // "cobalt" and any unknown value fall back to the default dark palette.
+            _ => ("#05070c", "#dfe5f0", "#0b0f18", "#222b3d", "#7aa6f5"),
         };
 
         let full_document = format!(
