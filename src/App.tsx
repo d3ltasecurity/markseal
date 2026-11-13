@@ -54,6 +54,15 @@ interface SearchMatch {
   snippet: string;
 }
 
+interface SealReport {
+  markdown: string;
+  sealed: number;
+  rekeyed: number;
+  originals_removed: number;
+  originals_kept: number;
+  skipped: string[];
+}
+
 interface OutlineItem {
   level: number;
   text: string;
@@ -104,6 +113,28 @@ const WELCOME_NOTE =
 const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
 const isDiskPath = (path: string) => path.includes("/") || path.includes("\\");
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
+const IMAGE_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  svg: "image/svg+xml",
+  avif: "image/avif",
+  ico: "image/x-icon",
+};
+
+// "assets/img_1.png.enc" -> "image/png"
+function imageMime(url: string): string {
+  const inner = url.replace(/\.enc$/i, "").split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_MIME[inner] ?? "application/octet-stream";
+}
+
+// A local, unencrypted image reference such as ![x](assets/pic.png).
+const PLAINTEXT_IMAGE_REF =
+    /!\[[^\]]*\]\((?![a-z][a-z0-9+.-]*:)[^)\s]+\.(?:png|jpe?g|gif|webp|bmp|svg|avif|ico)[)\s]/i;
 
 function readStored(key: string): string | null {
   try {
@@ -262,6 +293,8 @@ export default function App() {
 
   const [confirmClosePath, setConfirmClosePath] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Bumped to rebuild the editor when a tab's content changes underneath it without a path change.
+  const [editorEpoch, setEditorEpoch] = useState(0);
   const [justSaved, setJustSaved] = useState(false);
   // `id` re-keys the status line so each new message replays its entrance animation.
   const [status, setStatus] = useState<{ message: string; tone: Tone; id: number }>({
@@ -283,6 +316,8 @@ export default function App() {
   const spyFrame = useRef(0);
   const spyLockUntil = useRef(0);
   const savedTimer = useRef(0);
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
   const themeRef = useRef(theme);
   themeRef.current = theme;
 
@@ -357,11 +392,30 @@ export default function App() {
     host.innerHTML = "";
     baselineRef.current = activeTab.isDirty ? null : activeTab.content;
 
+    // Decrypted images live only in memory as blob: URLs, released with the editor.
+    const blobUrls: string[] = [];
+    const decryptedImages = new Map<string, Promise<string>>();
+    // The tab as it is right now — the passphrase can change (re-key) while the editor lives.
+    const liveTab = () => tabsRef.current.find((t) => t.path === tabPath);
+
     const upload = async (file: File): Promise<string> => {
       const mdPath = activeTab?.path;
       if (mdPath && (mdPath.includes("/") || mdPath.includes("\\"))) {
         const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
         const ext = file.name.includes(".") ? file.name.split(".").pop() || "png" : "png";
+        const tab = liveTab();
+        if (tab?.isEncrypted) {
+          // An image in an encrypted note must never reach the disk in the clear.
+          if (!tab.sessionPassword) {
+            throw new Error("Unlock the note before adding images to it.");
+          }
+          return await invoke<string>("save_encrypted_image", {
+            activeMdPath: mdPath,
+            imageBytes: bytes,
+            extension: ext,
+            password: tab.sessionPassword,
+          });
+        }
         return await invoke<string>("save_pasted_image", {
           activeMdPath: mdPath,
           imageBytes: bytes,
@@ -430,7 +484,31 @@ export default function App() {
             const dir = mdPath.includes(sep) ? mdPath.slice(0, mdPath.lastIndexOf(sep)) : "";
             if (!dir) return url;
             const abs = `${dir}${sep}${url.replace(/^\.?[\\/]/, "").replace(/[\\/]/g, sep)}`;
-            return convertFileSrc(abs);
+            if (!/\.enc$/i.test(url)) return convertFileSrc(abs);
+
+            // Encrypted image: decrypt in memory and show it from a blob: URL.
+            const cached = decryptedImages.get(url);
+            if (cached) return cached;
+            const password = liveTab()?.sessionPassword;
+            if (!password) return url;
+            const pending = invoke<ArrayBuffer | number[]>("read_encrypted_image", {
+              filePath: abs,
+              password,
+            })
+                .then((data) => {
+                  const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data);
+                  const blobUrl = URL.createObjectURL(new Blob([bytes], { type: imageMime(url) }));
+                  if (destroyed) URL.revokeObjectURL(blobUrl);
+                  else blobUrls.push(blobUrl);
+                  return blobUrl;
+                })
+                .catch((err: unknown) => {
+                  decryptedImages.delete(url);
+                  notify(`Could not decrypt image ${baseName(url)}: ${err}`, "error");
+                  return url;
+                });
+            decryptedImages.set(url, pending);
+            return pending;
           },
         },
       },
@@ -472,13 +550,14 @@ export default function App() {
       destroyed = true;
       window.clearTimeout(refreshTimer);
       touchEvents.forEach((type) => host.removeEventListener(type, markTouched, true));
+      blobUrls.forEach((blobUrl) => URL.revokeObjectURL(blobUrl));
       if (crepeRef.current === crepe) {
         crepe.destroy();
         crepeRef.current = null;
         crepePathRef.current = null;
       }
     };
-  }, [activeTabPath]);
+  }, [activeTabPath, editorEpoch]);
 
   // Live theme switch: CSS variables repaint the editor; only CodeMirror's syntax palette
   // needs an explicit swap. The Milkdown instance is never recreated.
@@ -779,11 +858,16 @@ export default function App() {
 
       setVaultBusy(true);
       try {
-        await invoke("save_encrypted_markdown", {
+        // One all-or-nothing step: the note and every image it references end up under the
+        // same passphrase, or nothing changes.
+        const report = await invoke<SealReport>("seal_note", {
           filePath: encPath,
           content: latestMarkdown,
           password: vaultPassword,
+          previousPassword: activeTab.isEncrypted ? activeTab.sessionPassword ?? null : null,
+          removePlaintextAssets: shredOriginal && isDiskPath(activeTab.path),
         });
+        const sealedMarkdown = report.markdown;
 
         if (
             shredOriginal &&
@@ -795,14 +879,14 @@ export default function App() {
 
         const newName = baseName(encPath);
         const sessionPassword = vaultPassword;
-        baselineRef.current = latestMarkdown;
+        baselineRef.current = sealedMarkdown;
         setTabs((prev) =>
             prev.map((t) =>
                 t.path === activeTab.path
                     ? {
                       path: encPath,
                       name: newName,
-                      content: latestMarkdown,
+                      content: sealedMarkdown,
                       isDirty: false,
                       isEncrypted: true,
                       sessionPassword,
@@ -811,9 +895,29 @@ export default function App() {
             )
         );
         setActiveTabPath(encPath);
+        // Same path but rewritten image links: the live editor must reload them.
+        if (activeTab.path === encPath && sealedMarkdown !== latestMarkdown) {
+          setEditorEpoch((n) => n + 1);
+        }
         closeVault();
         if (workspaceRoot) await refreshWorkspace(workspaceRoot);
-        notify(`Encrypted with AES-256-GCM + Argon2id: ${newName}`, "vault");
+
+        const imageCount = report.sealed + report.rekeyed;
+        const imageNote =
+            imageCount > 0 ? ` · ${imageCount} image${imageCount === 1 ? "" : "s"} encrypted` : "";
+        if (report.originals_kept > 0) {
+          notify(
+              `Encrypted ${newName}${imageNote}, but ${report.originals_kept} unencrypted image file(s) could not be removed — delete them from the assets folder.`,
+              "warn"
+          );
+        } else if (report.skipped.length > 0) {
+          notify(
+              `Encrypted ${newName}${imageNote}. Left unencrypted: ${report.skipped.join("; ")}`,
+              "warn"
+          );
+        } else {
+          notify(`Encrypted with AES-256-GCM + Argon2id: ${newName}${imageNote}`, "vault");
+        }
       } catch (err) {
         setVaultBusy(false);
         setVaultError(`Encryption error: ${err}`);
@@ -1184,8 +1288,8 @@ export default function App() {
   const canShredOriginal =
       vaultModal.mode === "encrypt" &&
       !!activeTab &&
-      !activeTab.isEncrypted &&
-      isDiskPath(activeTab.path);
+      isDiskPath(activeTab.path) &&
+      (!activeTab.isEncrypted || PLAINTEXT_IMAGE_REF.test(activeTab.content));
 
   const shellClass = [
     "app-shell",
@@ -1697,7 +1801,7 @@ export default function App() {
                                     checked={shredOriginal}
                                     onChange={(e) => setShredOriginal(e.target.checked)}
                                 />
-                                <span>Overwrite &amp; delete original unencrypted .md file (best-effort on SSDs)</span>
+                                <span>Overwrite &amp; delete the unencrypted originals — the .md file and its images (best-effort on SSDs)</span>
                               </label>
                               <p className="fine-print">
                                 Single-pass overwrite cannot guarantee physical block erasure on SSDs, NVMe,

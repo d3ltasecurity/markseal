@@ -53,6 +53,26 @@ writing.
 - Passphrases and derived keys are held in `Zeroizing` buffers and wiped after
   use. Plaintext is never written to disk for encrypted notes.
 
+#### Images in encrypted notes
+- An image pasted into an encrypted note is written by `save_encrypted_image` as
+  a binary envelope (`MARKFORGE_IMG_V1` | salt | nonce | AES-256-GCM
+  ciphertext), with its own random salt and nonce and the same Argon2id
+  parameters. It is decrypted in memory by `read_encrypted_image` and shown from
+  a `blob:` URL; the plaintext image never touches the disk.
+- The image header is a separate AAD domain from the note header, so a note
+  envelope cannot be replayed as an image or the reverse.
+- Encrypting a note (or changing its passphrase) goes through `seal_note`, which
+  treats the note and its images as one unit: plaintext images it references are
+  encrypted and the links rewritten, already-encrypted images are moved to the
+  new passphrase, and the note is written last. If any step fails, re-keyed
+  images are restored and new files removed, so a note and its images never end
+  up under different passphrases.
+- `seal_note` only touches regular files with an image extension that resolve
+  inside the note's own folder. Links with a scheme, a drive letter, an absolute
+  path, `..`, or a symlink are skipped, so crafted Markdown cannot get other
+  files encrypted or deleted. Originals are removed only after the encrypted
+  copy is verified on disk, and only under the strict-workspace delete rule.
+
 ### 4. HTML export sanitization
 Exported HTML is generated with `pulldown-cmark` and then sanitized with
 `ammonia`; the document title is HTML-entity-escaped. Script tags and event
@@ -79,6 +99,17 @@ and workspace search to prevent out-of-memory conditions.
   This is stated in the UI.
 - **Dev mode CSP.** The locked production CSP may limit Vite hot-reload during
   `npm run tauri dev`; the shipped binary is unaffected.
+- **Image file names and sizes are visible.** Encrypted images keep a
+  recognisable name (`img_<time>_<random>.png.enc`) and their size on disk; only
+  the contents are protected.
+- **Shared images.** If two notes reference the same image file and one is
+  encrypted with "delete originals" ticked, the other note loses that image.
+- **Only inline image links are converted.** Reference-style images
+  (`![alt][ref]`), percent-encoded paths, and images outside the note's folder
+  are left unencrypted; the app reports which ones were skipped.
+- **One key derivation per image.** Opening a note decrypts its images one at a
+  time (64 MiB of memory each), so a note with many images takes longer to show
+  them.
 
 ## Audit trail
 
@@ -90,10 +121,11 @@ The pre-release hardening history is in git:
 - `82bad79` — session dialog allowlist, strict delete confinement, production
   CSP, license + documentation.
 
-Covered by 7 Rust integration tests in `src-tauri/tests/security_tests.rs`
+Covered by 10 Rust integration tests in `src-tauri/tests/security_tests.rs`
 (encryption + tamper detection, path traversal / null byte, workspace
 confinement, dialog-allowlist allow/deny, strict delete, HTML XSS stripping,
-image-paste contract).
+image-paste contract, encrypted images never in plaintext on disk, sealing a
+note's existing images with crafted-link refusal, re-key with rollback).
 
 ## Reporting a vulnerability
 

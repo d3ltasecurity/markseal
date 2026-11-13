@@ -29,3 +29,23 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 ammonia = "4"
 pulldown-cmark = "0.12"
 window-vibrancy = "0.5"
+
+# Argon2id and AES-GCM are unusably slow when unoptimised (seconds per unlock in `tauri dev`
+# and minutes for the test suite), so the crypto crates are always built optimised.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.aes-gcm]
+opt-level = 3
+
+[profile.dev.package.ghash]
+opt-level = 3
+
+[profile.dev.package.polyval]
+opt-level = 3

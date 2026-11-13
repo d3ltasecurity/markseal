@@ -205,3 +205,197 @@ fn test_delete_outside_workspace_always_rejected() {
     clear_dialog_authorized_paths();
     let _ = fs::remove_dir_all(&base_temp);
 }
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+fn sample_image_payload() -> Vec<u8> {
+    let mut payload = vec![137, 80, 78, 71, 13, 10, 26, 10]; // PNG header bytes
+    payload.extend_from_slice(b"PLAINTEXT-PIXEL-MARKER-PLAINTEXT-PIXEL-MARKER");
+    payload
+}
+
+#[test]
+fn test_encrypted_image_never_touches_disk_in_plaintext() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    let temp_dir = std::env::temp_dir().join("markforge_enc_img_test");
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).unwrap();
+    set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
+
+    let note_path = temp_dir.join("vault.md.enc");
+    let note_str = note_path.to_str().unwrap().to_string();
+    let password = "CorrectHorseBatteryStaple#2026!";
+    let payload = sample_image_payload();
+
+    let rel_path =
+        save_encrypted_image(note_str.clone(), payload.clone(), "PNG".into(), password.into())
+            .unwrap();
+    assert!(rel_path.starts_with("assets/img_"));
+    assert!(rel_path.ends_with(".png.enc"));
+
+    let image_path = temp_dir.join(&rel_path);
+    let image_str = image_path.to_str().unwrap().to_string();
+    let on_disk = fs::read(&image_path).unwrap();
+    assert!(on_disk.starts_with(IMG_HEADER), "image envelope must carry the image header");
+    assert!(
+        !contains_bytes(&on_disk, b"PLAINTEXT-PIXEL-MARKER"),
+        "image bytes must not be readable on disk"
+    );
+    assert!(!contains_bytes(&on_disk, &payload[..8]), "PNG header must not be readable on disk");
+
+    assert_eq!(read_encrypted_image_inner(&image_str, password).unwrap(), payload);
+    assert!(read_encrypted_image_inner(&image_str, "WrongPass!").is_err());
+
+    // Integrity: a single flipped bit must fail authentication.
+    let mut tampered = on_disk.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    fs::write(&image_path, &tampered).unwrap();
+    assert!(read_encrypted_image_inner(&image_str, password).is_err());
+
+    // Domain separation: a note envelope is never accepted as an image.
+    save_encrypted_markdown(note_str.clone(), "# Note".into(), password.into()).unwrap();
+    assert!(read_encrypted_image_inner(&note_str, password).is_err());
+
+    // Empty passphrases are refused before anything is written.
+    assert!(save_encrypted_image(note_str, payload, "png".into(), "   ".into()).is_err());
+
+    set_active_workspace_bound(None);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_seal_note_encrypts_existing_images_and_rewrites_links() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    let base = std::env::temp_dir().join("markforge_seal_test");
+    let _ = fs::remove_dir_all(&base);
+    let ws_dir = base.join("workspace");
+    fs::create_dir_all(ws_dir.join("assets")).unwrap();
+    set_workspace_root_inner(ws_dir.to_str().unwrap()).unwrap();
+
+    let payload = sample_image_payload();
+    let picture = ws_dir.join("assets").join("pic.png");
+    let not_an_image = ws_dir.join("assets").join("keep.txt");
+    let outside = base.join("outside.png");
+    fs::write(&picture, &payload).unwrap();
+    fs::write(&not_an_image, "must survive").unwrap();
+    fs::write(&outside, &payload).unwrap();
+
+    let markdown = concat!(
+        "# Title\n\n",
+        "![a](assets/pic.png)\n\n",
+        "![b](assets/pic.png \"assets/pic.png\")\n\n",
+        "![c](../outside.png)\n\n",
+        "![d](assets/keep.txt)\n\n",
+        "![e](https://example.com/remote.png)\n",
+    );
+    let note_path = ws_dir.join("note.md.enc");
+    let note_str = note_path.to_str().unwrap().to_string();
+    let password = "CorrectHorseBatteryStaple#2026!";
+
+    let report = seal_note(note_str.clone(), markdown.into(), password.into(), None, true).unwrap();
+
+    assert_eq!(report.sealed, 1);
+    assert_eq!(report.rekeyed, 0);
+    assert_eq!(report.originals_removed, 1);
+    assert_eq!(report.originals_kept, 0);
+    assert_eq!(report.skipped.len(), 2, "traversal and non-image references are skipped");
+
+    // Both inline links are rewritten; the title text and remote URL are left alone.
+    assert!(report.markdown.contains("![a](assets/pic.png.enc)"));
+    assert!(report.markdown.contains("![b](assets/pic.png.enc \"assets/pic.png\")"));
+    assert!(report.markdown.contains("![c](../outside.png)"));
+    assert!(report.markdown.contains("![d](assets/keep.txt)"));
+    assert!(report.markdown.contains("![e](https://example.com/remote.png)"));
+
+    assert!(!picture.exists(), "plaintext original must be removed");
+    let sealed = ws_dir.join("assets").join("pic.png.enc");
+    assert!(!contains_bytes(&fs::read(&sealed).unwrap(), b"PLAINTEXT-PIXEL-MARKER"));
+    assert_eq!(read_encrypted_image_inner(sealed.to_str().unwrap(), password).unwrap(), payload);
+
+    // Crafted references can never get other files encrypted or deleted.
+    assert_eq!(fs::read(&outside).unwrap(), payload, "file outside the note folder is untouched");
+    assert_eq!(fs::read_to_string(&not_an_image).unwrap(), "must survive");
+
+    // The stored note is the rewritten Markdown.
+    assert_eq!(read_encrypted_markdown(note_str, password.into()).unwrap(), report.markdown);
+
+    set_active_workspace_bound(None);
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_seal_note_rekeys_images_and_rolls_back_on_failure() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    let temp_dir = std::env::temp_dir().join("markforge_rekey_test");
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).unwrap();
+    set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
+
+    let note_path = temp_dir.join("note.md.enc");
+    let note_str = note_path.to_str().unwrap().to_string();
+    let old_password = "OldPassphrase#2026!";
+    let new_password = "NewPassphrase#2027!";
+    let payload = sample_image_payload();
+
+    let first = save_encrypted_image(
+        note_str.clone(),
+        payload.clone(),
+        "png".into(),
+        old_password.into(),
+    )
+    .unwrap();
+    let foreign = save_encrypted_image(
+        note_str.clone(),
+        payload.clone(),
+        "png".into(),
+        "SomeoneElse#1".into(),
+    )
+    .unwrap();
+    let first_str = temp_dir.join(&first).to_str().unwrap().to_string();
+
+    let good_markdown = format!("# Note\n\n![1.00]({})\n", first);
+    seal_note(note_str.clone(), good_markdown.clone(), old_password.into(), None, false).unwrap();
+
+    // The second image cannot be opened with the old passphrase, so the re-key fails AFTER the
+    // first image was already rewritten. Everything must be put back.
+    let bad_markdown = format!("# Note\n\n![1.00]({})\n\n![1.00]({})\n", first, foreign);
+    let failed = seal_note(
+        note_str.clone(),
+        bad_markdown,
+        new_password.into(),
+        Some(old_password.into()),
+        false,
+    );
+    assert!(failed.is_err());
+    assert_eq!(
+        read_encrypted_image_inner(&first_str, old_password).unwrap(),
+        payload,
+        "a failed re-key must restore images to the old passphrase"
+    );
+    assert_eq!(
+        read_encrypted_markdown(note_str.clone(), old_password.into()).unwrap(),
+        good_markdown,
+        "a failed re-key must leave the note untouched"
+    );
+
+    // A clean re-key moves the image and the note to the new passphrase together.
+    let report = seal_note(
+        note_str.clone(),
+        good_markdown.clone(),
+        new_password.into(),
+        Some(old_password.into()),
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.rekeyed, 1);
+    assert_eq!(report.sealed, 0);
+    assert_eq!(report.markdown, good_markdown);
+    assert_eq!(read_encrypted_image_inner(&first_str, new_password).unwrap(), payload);
+    assert!(read_encrypted_image_inner(&first_str, old_password).is_err());
+    assert_eq!(read_encrypted_markdown(note_str, new_password.into()).unwrap(), good_markdown);
+
+    set_active_workspace_bound(None);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
