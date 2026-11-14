@@ -5,7 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -210,6 +210,54 @@ pub fn atomic_write_bytes(target_path: &Path, data: &[u8]) -> Result<(), String>
     })
 }
 
+/// How many names (hard links) point at this file's data. `None` when it cannot be read.
+#[cfg(windows)]
+pub fn hard_link_count(path: &Path) -> Option<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = File::open(path).ok()?;
+    // SAFETY: `info` is a plain-data struct that the call fills in, and the handle stays valid
+    // for the whole call because `file` is alive until the end of this function.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    (ok != 0).then_some(u64::from(info.nNumberOfLinks))
+}
+
+#[cfg(unix)]
+pub fn hard_link_count(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| m.nlink())
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn hard_link_count(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Lets the webview display images that sit beside a note: the note's own folder and its
+/// immediate subfolders. This is the same reach as the dialog allowlist and never goes deeper.
+/// Nothing is granted at startup; the static asset scope in `tauri.conf.json` is empty.
+pub fn grant_note_asset_scope(note_path: &Path) {
+    const MAX_SUBFOLDERS: usize = 256;
+    let Some(app) = get_app_handle() else { return };
+    let Some(note_dir) = note_path.parent() else { return };
+    let scope = app.asset_protocol_scope();
+    let _ = scope.allow_directory(note_dir, false);
+    if let Ok(entries) = fs::read_dir(note_dir) {
+        let subfolders = entries.flatten().filter(|entry| {
+            let hidden = entry.file_name().to_string_lossy().starts_with('.');
+            // `file_type` does not follow symlinks, so linked folders are never granted.
+            !hidden && entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+        });
+        for entry in subfolders.take(MAX_SUBFOLDERS) {
+            let _ = scope.allow_directory(entry.path(), false);
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SearchMatch {
     pub file_path: String,
@@ -230,10 +278,9 @@ pub mod commands {
 
     #[tauri::command]
     pub fn authorize_dialog_path(app: tauri::AppHandle, path: String) -> Result<String, String> {
+        set_app_handle(app);
         let canon = authorize_dialog_path_inner(&path)?;
-        if let Some(parent) = canon.parent() {
-            let _ = app.asset_protocol_scope().allow_directory(parent, true);
-        }
+        grant_note_asset_scope(&canon);
         Ok(canon.to_string_lossy().to_string())
     }
 
@@ -247,7 +294,11 @@ pub mod commands {
             return Ok(());
         }
         let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        if len > 0 && len <= MAX_FILE_SIZE_BYTES {
+        // Overwrite only when this is the file's single name. Zeroing a hard-linked file would
+        // also destroy the data behind its other names, which may lie outside the workspace;
+        // such a file (or one whose link count cannot be read) is just unlinked.
+        let single_name = hard_link_count(&path) == Some(1);
+        if single_name && len > 0 && len <= MAX_FILE_SIZE_BYTES {
             if let Ok(mut file) = OpenOptions::new().write(true).open(&path) {
                 let zeros = vec![0u8; len as usize];
                 let _ = file.write_all(&zeros);
@@ -326,7 +377,10 @@ pub mod commands {
     pub fn read_markdown_file(file_path: String) -> Result<String, String> {
         let path = validate_secure_path(&file_path, None)?;
         enforce_file_size_limit(&path)?;
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))
+        let content =
+            fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+        grant_note_asset_scope(&path);
+        Ok(content)
     }
 
     #[tauri::command]
@@ -380,7 +434,7 @@ pub mod commands {
             .map_err(|e| format!("Failed to create assets directory: {}", e))?;
 
         if let Some(app) = get_app_handle() {
-            let _ = app.asset_protocol_scope().allow_directory(&assets_dir, true);
+            let _ = app.asset_protocol_scope().allow_directory(&assets_dir, false);
         }
 
         let clean_ext: String = extension
@@ -563,6 +617,9 @@ pub mod commands {
             "Decryption failed: Incorrect passphrase or file integrity check failed.".to_string()
         })?;
 
+        // An encrypted note can still reference plain images (ones `seal_note` had to skip).
+        grant_note_asset_scope(&path);
+
         let result = match String::from_utf8(std::mem::take(&mut decrypted_bytes)) {
             Ok(valid_str) => Ok(valid_str),
             Err(utf8_err) => {
@@ -580,8 +637,10 @@ pub mod commands {
     //
     // Images belonging to an encrypted note are stored as binary envelopes:
     //   IMG_HEADER (16) | salt (16) | nonce (12) | AES-256-GCM ciphertext + tag
-    // The header doubles as AAD, so a note envelope can never be replayed as an image
-    // (or the reverse). Each image has its own random salt and nonce.
+    // Each image has its own random salt and nonce. The AAD is the header plus the image's own
+    // file name, so a note envelope can never be replayed as an image (or the reverse), and an
+    // encrypted image cannot be renamed or swapped with another one under the same passphrase
+    // without failing authentication.
 
     /// Each Argon2id derivation needs 64 MiB and the editor requests every image of a note
     /// at once, so image key derivations run one at a time to keep memory bounded.
@@ -595,7 +654,27 @@ pub mod commands {
         "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "ico",
     ];
 
-    fn seal_image_bytes(plain: &[u8], password: &[u8]) -> Result<Vec<u8>, String> {
+    fn image_aad(file_name: &str) -> Vec<u8> {
+        let mut aad = Vec::with_capacity(IMG_HEADER.len() + 1 + file_name.len());
+        aad.extend_from_slice(&IMG_HEADER[..]);
+        aad.push(b':');
+        aad.extend_from_slice(file_name.as_bytes());
+        aad
+    }
+
+    /// The name an encrypted image is bound to: the last component of its path on disk.
+    fn asset_file_name(path: &Path) -> Result<&str, String> {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| "Encrypted image has no usable file name.".to_string())
+    }
+
+    fn seal_image_bytes(
+        plain: &[u8],
+        password: &[u8],
+        file_name: &str,
+    ) -> Result<Vec<u8>, String> {
         let mut salt = [0u8; 16];
         let mut nonce_bytes = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut salt);
@@ -611,7 +690,7 @@ pub mod commands {
                 Nonce::from_slice(&nonce_bytes),
                 Payload {
                     msg: plain,
-                    aad: &IMG_HEADER[..],
+                    aad: &image_aad(file_name),
                 },
             )
             .map_err(|e| format!("AES-256-GCM image encryption failed: {}", e))?;
@@ -624,7 +703,11 @@ pub mod commands {
         Ok(envelope)
     }
 
-    fn open_image_bytes(raw: &[u8], password: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+    fn open_image_bytes(
+        raw: &[u8],
+        password: &[u8],
+        file_name: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, String> {
         if raw.len() < IMAGE_ENVELOPE_OVERHEAD || raw[..16] != IMG_HEADER[..] {
             return Err("Invalid or tampered MarkForge encrypted image header.".into());
         }
@@ -641,11 +724,11 @@ pub mod commands {
                 Nonce::from_slice(&raw[32..44]),
                 Payload {
                     msg: &raw[44..],
-                    aad: &IMG_HEADER[..],
+                    aad: &image_aad(file_name),
                 },
             )
             .map_err(|_| {
-                "Decryption failed: Incorrect passphrase or image integrity check failed."
+                "Decryption failed: incorrect passphrase, or the image was changed, renamed or swapped."
                     .to_string()
             })?;
         Ok(Zeroizing::new(plain))
@@ -715,7 +798,7 @@ pub mod commands {
             random_hex(4),
             ext
         );
-        let envelope = seal_image_bytes(&bytes_guard, pass_guard.as_bytes())?;
+        let envelope = seal_image_bytes(&bytes_guard, pass_guard.as_bytes(), &filename)?;
         atomic_write_bytes(&assets_dir.join(&filename), &envelope)?;
         Ok(format!("assets/{}", filename))
     }
@@ -729,7 +812,7 @@ pub mod commands {
             return Err("Encrypted image exceeds the 25 MB safety limit.".into());
         }
         let raw = fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
-        let mut plain = open_image_bytes(&raw, password.as_bytes())?;
+        let mut plain = open_image_bytes(&raw, password.as_bytes(), asset_file_name(&path)?)?;
         Ok(std::mem::take(&mut *plain))
     }
 
@@ -822,14 +905,16 @@ pub mod commands {
 
     /// Encrypts a note together with its images, as one all-or-nothing operation.
     ///
-    /// 1. Images already encrypted under `previous_password` are moved to `password`.
-    /// 2. Plaintext images referenced by the note are encrypted next to the originals and the
-    ///    links are rewritten.
-    /// 3. The note itself is written with `save_encrypted_markdown`.
-    /// If any step fails, re-keyed images are restored and new files are removed, so the note
-    /// and its images never end up under different passphrases.
-    /// 4. Only after success, and only if asked, the plaintext originals are removed under the
-    ///    same strict-workspace rule as `delete_note_file`.
+    /// 1. Images already encrypted under `previous_password` are re-encrypted under `password`
+    ///    into NEW files (`pic.png.enc` -> `pic_k<8 hex>.png.enc`); the old files are left alone.
+    /// 2. Plaintext images referenced by the note are encrypted next to the originals.
+    /// 3. The links are rewritten and the note is written with `save_encrypted_markdown`. That
+    ///    single atomic rename is the switch-over.
+    /// Until step 3 succeeds nothing that already existed has been changed, so an error or a
+    /// crash leaves the old note and its images fully readable. On an error the new files are
+    /// removed; after a crash they remain as unreferenced ciphertext.
+    /// 4. Only after success are the superseded encrypted images removed and, if asked, the
+    ///    plaintext originals, under the same strict-workspace rule as `delete_note_file`.
     #[tauri::command(async)]
     pub fn seal_note(
         file_path: String,
@@ -868,8 +953,11 @@ pub mod commands {
             .is_some_and(|previous| previous.as_str() != pass_guard.as_str());
 
         let mut seen: HashSet<&str> = HashSet::new();
-        let mut to_rekey: Vec<PathBuf> = Vec::new();
-        let mut to_seal: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+        // (file as it is now, file to create). One entry per file, however many links use it.
+        let mut to_rekey: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut to_seal: Vec<(PathBuf, PathBuf)> = Vec::new();
+        // Link destination as written in the note -> what it becomes.
+        let mut replacements: HashMap<&str, String> = HashMap::new();
         let mut skipped: Vec<String> = Vec::new();
 
         for (dest, _) in &occurrences {
@@ -888,9 +976,34 @@ pub mod commands {
             let lower = file_name.to_lowercase();
 
             if lower.ends_with(".enc") {
-                if needs_rekey && is_image_envelope(&source) {
-                    to_rekey.push(source);
+                if !(needs_rekey && is_image_envelope(&source)) {
+                    continue;
                 }
+                // A re-encrypted image gets a new file name, so its link has to be rewritten.
+                if unlocatable.contains(dest.as_str()) {
+                    return Err(format!(
+                        "Cannot change the passphrase: the encrypted image {} is linked with a reference-style link. Change it to an inline link first.",
+                        dest
+                    ));
+                }
+                let target = match to_rekey.iter().find(|(current, _)| *current == source) {
+                    Some((_, planned)) => planned.clone(),
+                    None => {
+                        let planned = (0..8)
+                            .map(|_| source.with_file_name(rekeyed_file_name(&file_name)))
+                            .find(|candidate| !candidate.exists())
+                            .ok_or_else(|| {
+                                "Could not pick a free file name for a re-encrypted image."
+                                    .to_string()
+                            })?;
+                        to_rekey.push((source.clone(), planned.clone()));
+                        planned
+                    }
+                };
+                replacements.insert(
+                    dest.as_str(),
+                    with_link_file_name(dest, asset_file_name(&target)?),
+                );
                 continue;
             }
             let extension = lower.rsplit('.').next().unwrap_or_default();
@@ -906,61 +1019,76 @@ pub mod commands {
                 skipped.push(format!("{} (larger than 25 MB)", dest));
                 continue;
             }
-            let target = source.with_file_name(format!("{}.enc", file_name));
-            if target.exists() {
-                skipped.push(format!("{} ({}.enc already exists)", dest, file_name));
-                continue;
+            if !to_seal.iter().any(|(planned, _)| *planned == source) {
+                let target = source.with_file_name(format!("{}.enc", file_name));
+                if target.exists() {
+                    skipped.push(format!("{} ({}.enc already exists)", dest, file_name));
+                    continue;
+                }
+                to_seal.push((source, target));
             }
-            to_seal.push((dest.clone(), source, target));
+            replacements.insert(dest.as_str(), format!("{}.enc", dest));
         }
 
-        // ---- Execute, keeping enough state to undo everything ----
-        let mut backups: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        // ---- Execute. Only new files are written here; nothing that already exists is changed
+        // until the note itself has been written. A crash or an error at any point therefore
+        // leaves the old note and every one of its images readable with the old passphrase. ----
         let mut created: Vec<PathBuf> = Vec::new();
 
         let outcome = {
             let mut run = || -> Result<String, String> {
                 if let Some(previous) = previous_guard.as_ref().filter(|_| needs_rekey) {
-                    for path in &to_rekey {
-                        let raw = fs::read(path)
+                    for (current, target) in &to_rekey {
+                        let len = fs::metadata(current)
+                            .map_err(|e| format!("Failed to read encrypted image: {}", e))?
+                            .len();
+                        if len > MAX_FILE_SIZE_BYTES + IMAGE_ENVELOPE_OVERHEAD as u64 {
+                            return Err("Encrypted image exceeds the 25 MB safety limit.".into());
+                        }
+                        let raw = fs::read(current)
                             .map_err(|e| format!("Failed to read encrypted image: {}", e))?;
-                        let plain = open_image_bytes(&raw, previous.as_bytes())?;
-                        let envelope = seal_image_bytes(&plain, pass_guard.as_bytes())?;
-                        backups.push((path.clone(), raw));
-                        atomic_write_bytes(path, &envelope)?;
+                        let plain =
+                            open_image_bytes(&raw, previous.as_bytes(), asset_file_name(current)?)?;
+                        let envelope = seal_image_bytes(
+                            &plain,
+                            pass_guard.as_bytes(),
+                            asset_file_name(target)?,
+                        )?;
+                        created.push(target.clone());
+                        write_verified(target, &envelope)?;
                     }
                 }
 
-                for (_, source, target) in &to_seal {
+                for (source, target) in &to_seal {
                     let plain = Zeroizing::new(
                         fs::read(source).map_err(|e| format!("Failed to read image: {}", e))?,
                     );
-                    let envelope = seal_image_bytes(&plain, pass_guard.as_bytes())?;
+                    let envelope =
+                        seal_image_bytes(&plain, pass_guard.as_bytes(), asset_file_name(target)?)?;
                     created.push(target.clone());
-                    atomic_write_bytes(target, &envelope)?;
-                    // Confirm what reached the disk before the original may be removed.
-                    let written = fs::read(target)
-                        .map_err(|e| format!("Failed to verify encrypted image: {}", e))?;
-                    if written != envelope {
-                        return Err("Encrypted image verification failed after write.".into());
-                    }
+                    // Confirmed on disk before the original may be removed.
+                    write_verified(target, &envelope)?;
                 }
 
-                let sealed_dests: HashSet<&str> =
-                    to_seal.iter().map(|(dest, _, _)| dest.as_str()).collect();
-                let mut rewritten = String::with_capacity(content_guard.len() + 4 * to_seal.len());
+                let mut rewritten =
+                    String::with_capacity(content_guard.len() + 16 * replacements.len());
                 let mut cursor = 0;
                 for (dest, span) in &occurrences {
                     let Some((start, end)) = *span else { continue };
-                    if start < cursor || !sealed_dests.contains(dest.as_str()) {
+                    let Some(replacement) = replacements.get(dest.as_str()) else {
+                        continue;
+                    };
+                    if start < cursor {
                         continue;
                     }
-                    rewritten.push_str(&content_guard[cursor..end]);
-                    rewritten.push_str(".enc");
+                    rewritten.push_str(&content_guard[cursor..start]);
+                    rewritten.push_str(replacement);
                     cursor = end;
                 }
                 rewritten.push_str(&content_guard[cursor..]);
 
+                // The switch-over: one atomic rename moves the note to the new links and the
+                // new passphrase together.
                 save_encrypted_markdown(
                     file_path.clone(),
                     rewritten.clone(),
@@ -974,9 +1102,7 @@ pub mod commands {
         let markdown = match outcome {
             Ok(markdown) => markdown,
             Err(error) => {
-                for (path, raw) in &backups {
-                    let _ = atomic_write_bytes(path, raw);
-                }
+                // Every path in `created` was checked not to exist before it was written.
                 for path in &created {
                     let _ = fs::remove_file(path);
                 }
@@ -984,10 +1110,16 @@ pub mod commands {
             }
         };
 
+        // The note no longer points at the old ciphertext. It is still encrypted under the old
+        // passphrase, so a leftover copy (if removal fails) reveals nothing.
+        for (current, _) in &to_rekey {
+            let _ = fs::remove_file(current);
+        }
+
         let mut originals_removed = 0;
         let mut originals_kept = 0;
         if remove_plaintext_assets {
-            for (_, source, _) in &to_seal {
+            for (source, _) in &to_seal {
                 match source.to_str().map(|s| delete_note_file(s.to_string())) {
                     Some(Ok(())) => originals_removed += 1,
                     _ => originals_kept += 1,
@@ -998,11 +1130,59 @@ pub mod commands {
         Ok(SealReport {
             markdown,
             sealed: to_seal.len(),
-            rekeyed: backups.len(),
+            rekeyed: to_rekey.len(),
             originals_removed,
             originals_kept,
             skipped,
         })
+    }
+
+    /// Writes an image envelope and reads it back, so nothing is ever removed on the strength
+    /// of a write that did not really reach the disk.
+    fn write_verified(target: &Path, envelope: &[u8]) -> Result<(), String> {
+        atomic_write_bytes(target, envelope)?;
+        let written =
+            fs::read(target).map_err(|e| format!("Failed to verify encrypted image: {}", e))?;
+        if written != envelope {
+            return Err("Encrypted image verification failed after write.".into());
+        }
+        Ok(())
+    }
+
+    /// `pic.png.enc` -> `pic_k1a2b3c4d.png.enc`. An earlier `_k<8 hex>` tag is replaced rather
+    /// than stacked, so names do not grow with every passphrase change.
+    fn rekeyed_file_name(file_name: &str) -> String {
+        let cut = file_name.len().saturating_sub(4);
+        let inner = if file_name.is_char_boundary(cut)
+            && file_name[cut..].eq_ignore_ascii_case(".enc")
+        {
+            &file_name[..cut]
+        } else {
+            file_name
+        };
+        let (stem, extension) = match inner.rfind('.') {
+            Some(dot) if dot > 0 => inner.split_at(dot),
+            _ => (inner, ""),
+        };
+        let bytes = stem.as_bytes();
+        let stem = if bytes.len() > 10
+            && bytes[bytes.len() - 10] == b'_'
+            && bytes[bytes.len() - 9] == b'k'
+            && bytes[bytes.len() - 8..]
+                .iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+        {
+            &stem[..stem.len() - 10]
+        } else {
+            stem
+        };
+        format!("{}_k{}{}.enc", stem, random_hex(4), extension)
+    }
+
+    /// Swaps the file name at the end of a Markdown link destination, keeping its folder part.
+    fn with_link_file_name(dest: &str, new_name: &str) -> String {
+        let cut = dest.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
+        format!("{}{}", &dest[..cut], new_name)
     }
 
     fn escape_html_entities(input: &str) -> String {

@@ -30,6 +30,10 @@ ammonia = "4"
 pulldown-cmark = "0.12"
 window-vibrancy = "0.5"
 
+# Hard-link count of a file, so a zero-overwrite never reaches data behind another name.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 # Argon2id and AES-GCM are unusably slow when unoptimised (seconds per unlock in `tauri dev`
 # and minutes for the test suite), so the crypto crates are always built optimised.
 [profile.dev.package.argon2]

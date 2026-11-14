@@ -38,11 +38,22 @@ sibling files and its `assets/` subfolder, so note-relative images
 (`<note_dir>/assets/img_*.png`) load correctly. It never widens to the whole
 filesystem.
 
+**Image display (asset protocol).** The static asset scope in
+`tauri.conf.json` is empty, so the webview can load no local file at startup.
+Scope is granted at runtime only: the opened workspace folder, and for a note
+opened or read outside it, that note's own folder and its immediate subfolders
+(not recursive; hidden folders and symlinked folders are skipped).
+
 ### 2. Deletion is strictly workspace-only
 `delete_note_file` and `secure_shred_file` use `validate_strict_workspace_path`
 and ignore the dialog allowlist entirely. A file Save-As'd outside the workspace
 can never be deleted or overwritten by the app, even after it was authorized for
 writing.
+
+The zero-overwrite before deletion is skipped for a file that has more than one
+hard link (or whose link count cannot be read); such a file is only unlinked.
+Otherwise a hard link planted in the workspace could get the data of a file
+outside it overwritten.
 
 ### 3. Encryption (zero-knowledge notes)
 - Key derivation: **Argon2id** (64 MiB memory, 3 iterations, 4 lanes, 32-byte
@@ -59,14 +70,20 @@ writing.
   ciphertext), with its own random salt and nonce and the same Argon2id
   parameters. It is decrypted in memory by `read_encrypted_image` and shown from
   a `blob:` URL; the plaintext image never touches the disk.
-- The image header is a separate AAD domain from the note header, so a note
-  envelope cannot be replayed as an image or the reverse.
+- The AAD of an image is its header plus its own file name. The header keeps
+  images in a separate domain from notes, so a note envelope cannot be replayed
+  as an image or the reverse. The file name means an encrypted image cannot be
+  renamed, or swapped with another image under the same passphrase, without
+  failing authentication.
 - Encrypting a note (or changing its passphrase) goes through `seal_note`, which
-  treats the note and its images as one unit: plaintext images it references are
-  encrypted and the links rewritten, already-encrypted images are moved to the
-  new passphrase, and the note is written last. If any step fails, re-keyed
-  images are restored and new files removed, so a note and its images never end
-  up under different passphrases.
+  treats the note and its images as one unit. It only ever writes **new** files
+  first: plaintext images are encrypted next to the originals, and
+  already-encrypted images are re-encrypted under the new passphrase into new
+  files (`pic.png.enc` → `pic_k<8 hex>.png.enc`). The links are then rewritten
+  and the note is saved with one atomic rename. Nothing that existed before is
+  changed until that rename succeeds, so an error or a crash at any point leaves
+  the old note and all its images readable with the old passphrase. Superseded
+  files are removed only afterwards.
 - `seal_note` only touches regular files with an image extension that resolve
   inside the note's own folder. Links with a scheme, a drive letter, an absolute
   path, `..`, or a symlink are skipped, so crafted Markdown cannot get other
@@ -79,6 +96,9 @@ writing.
   encrypted, then the plaintext and passphrase are dropped from app state. The
   idle check uses wall-clock time, so it still fires after the window was
   hidden or the machine slept.
+- **Out of view.** When the window is hidden or minimised, notes lock after one
+  minute (or the auto-lock time, if that is shorter). Turning auto-lock off
+  turns this off too.
 - **Panic key (`Ctrl+Shift+L`).** Does the same immediately and also clears the
   clipboard. The window is covered before any note is saved or closed.
 - A note that cannot be saved is left open rather than discarded; locking never
@@ -121,8 +141,31 @@ and workspace search to prevent out-of-memory conditions.
 - **Locking drops references, it does not wipe webview memory.** Decrypted text
   and the session passphrase live in JavaScript memory while a note is open;
   after a lock they are released for garbage collection, not overwritten.
-- **Auto-lock is idle-based only.** Locking Windows (`Win+L`) does not lock
-  notes immediately; they lock when the idle time runs out.
+- **Locking Windows does not lock notes at once.** There is no hook into the
+  Windows session lock (`Win+L`). Notes lock when the idle time runs out, or one
+  minute after the window is reported hidden. Whether WebView2 reports a locked
+  session as "hidden" has not been verified, so assume the idle time applies.
+- **Decrypted images are released, not wiped.** They are shown from in-memory
+  `blob:` URLs that are revoked when the note is locked or its tab is left; the
+  bytes are then freed by the webview, not overwritten.
+- **An encrypted image must keep its file name.** The name is part of what is
+  authenticated, so renaming a `.enc` image by hand makes it unreadable until it
+  is renamed back.
+- **What name binding does not stop.** Someone with write access to the disk can
+  still put back an older copy of the same image file, or exchange two images
+  that have the same file name in different folders and the same passphrase.
+- **Leftover files after a crash.** If the app dies while a note is being
+  encrypted or re-keyed, unreferenced `.enc` files can remain in the note's
+  folder. They are ciphertext and can be deleted by hand.
+- **KaTeX advisory GHSA-238p-pmpm-9mq7 (low) is present.** Math rendering uses
+  KaTeX through `@milkdown/crepe`, at a version before the fix (0.18.2), and
+  there is no non-breaking upgrade yet. The advisory needs a separate
+  prototype-pollution bug to already exist in the page; none is known here. If
+  one did, the worst documented outcome is a crafted link or an external
+  resource load; the CSP blocks inline script and `javascript:` URLs and does
+  not allow the page to load images or data from the network. HTML export does
+  not use KaTeX. This is an accepted risk to re-check on every dependency
+  update, not a proof that it cannot be exploited.
 - **Image file names and sizes are visible.** Encrypted images keep a
   recognisable name (`img_<time>_<random>.png.enc`) and their size on disk; only
   the contents are protected.
@@ -145,11 +188,16 @@ The pre-release hardening history is in git:
 - `82bad79` — session dialog allowlist, strict delete confinement, production
   CSP, license + documentation.
 
-Covered by 10 Rust integration tests in `src-tauri/tests/security_tests.rs`
+Covered by 11 Rust integration tests in `src-tauri/tests/security_tests.rs`
 (encryption + tamper detection, path traversal / null byte, workspace
 confinement, dialog-allowlist allow/deny, strict delete, HTML XSS stripping,
-image-paste contract, encrypted images never in plaintext on disk, sealing a
-note's existing images with crafted-link refusal, re-key with rollback).
+image-paste contract, encrypted images never in plaintext on disk, images bound
+to their file name (swap and rename fail), sealing a note's existing images with
+crafted-link refusal and no overwrite through a hard link, re-key that never
+touches the old files and cleans up on failure).
+
+Not covered by automated tests: the asset-protocol scope, the screen-capture
+shield, and the lock behaviour in the user interface.
 
 ## Reporting a vulnerability
 

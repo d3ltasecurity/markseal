@@ -110,6 +110,10 @@ const EMPTY_STATS: DocStats = { words: 0, chars: 0, lines: 0, minutes: 0 };
 // Idle minutes before decrypted notes are locked again. 0 = never.
 const AUTO_LOCK_CHOICES = [1, 5, 15, 30, 0];
 const AUTO_LOCK_DEFAULT = 5;
+// Once the window is hidden or minimised, decrypted notes lock after this long instead of
+// waiting out the full idle time.
+const HIDDEN_LOCK_MS = 60_000;
+type LockReason = "idle" | "panic" | "hidden";
 
 const WELCOME_NOTE =
     "# Welcome to MarkForge\n\nA local-first, **zero-knowledge** Markdown editor. Nothing you write leaves this machine.\n\n## Shortcuts\n\n- `Ctrl+K` — command palette\n- `Ctrl+N` — new note\n- `Ctrl+S` — save\n- `Ctrl+L` — encrypt the note with `AES-256-GCM` + `Argon2id`\n- `Ctrl+Shift+F` — search the workspace\n- `Ctrl+E` — export sanitized HTML\n- `Ctrl+P` — print or save as PDF\n- `Ctrl+\\` — focus mode\n\n> Without its passphrase, an encrypted note cannot be recovered.\n";
@@ -340,7 +344,7 @@ export default function App() {
   const savedTimer = useRef(0);
   const lastActivityRef = useRef(Date.now());
   const lockingRef = useRef(false);
-  const lockVaultRef = useRef<(reason: "idle" | "panic") => Promise<void>>(async () => {});
+  const lockVaultRef = useRef<(reason: LockReason) => Promise<void>>(async () => {});
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const activeTabPathRef = useRef(activeTabPath);
@@ -999,7 +1003,7 @@ export default function App() {
     }
   };
 
-  const lockVault = async (reason: "idle" | "panic") => {
+  const lockVault = async (reason: LockReason) => {
     if (lockingRef.current) return;
     const secretTabs = tabsRef.current.filter((t) => t.isEncrypted);
     if (secretTabs.length === 0) {
@@ -1083,6 +1087,8 @@ export default function App() {
         );
       } else if (reason === "idle") {
         announceLock(`Auto-locked ${notes} after ${autoLockMinutes} min idle${savedNote}`, "vault");
+      } else if (reason === "hidden") {
+        announceLock(`Auto-locked ${notes} while the window was out of view${savedNote}`, "vault");
       } else {
         announceLock(
             clipboardCleared
@@ -1127,6 +1133,33 @@ export default function App() {
       if (Date.now() - lastActivityRef.current >= limit) void lockVaultRef.current("idle");
     }, 10_000);
     return () => window.clearInterval(timer);
+  }, [autoLockMinutes]);
+
+  // Out of sight: lock shortly after the window is hidden or minimised. The elapsed time is
+  // also checked on the wall clock when the window comes back, because timers in a hidden
+  // window can be delayed and stop altogether while the machine sleeps.
+  useEffect(() => {
+    if (autoLockMinutes === 0) return;
+    const grace = Math.min(HIDDEN_LOCK_MS, autoLockMinutes * 60_000);
+    let hiddenAt: number | null = document.visibilityState === "hidden" ? Date.now() : null;
+    let timer = 0;
+    const onVisibility = () => {
+      window.clearTimeout(timer);
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        timer = window.setTimeout(() => void lockVaultRef.current("hidden"), grace);
+      } else {
+        if (hiddenAt !== null && Date.now() - hiddenAt >= grace) {
+          void lockVaultRef.current("hidden");
+        }
+        hiddenAt = null;
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [autoLockMinutes]);
 
   // Screen-capture shield: while a decrypted note (or the passphrase dialog) is on screen, the

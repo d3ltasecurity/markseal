@@ -282,12 +282,20 @@ fn test_seal_note_encrypts_existing_images_and_rewrites_links() {
     fs::write(&not_an_image, "must survive").unwrap();
     fs::write(&outside, &payload).unwrap();
 
+    // A hard link planted in the note folder that shares its data with a file outside it.
+    let precious = base.join("precious.png");
+    let linked = ws_dir.join("assets").join("linked.png");
+    fs::write(&precious, &payload).unwrap();
+    fs::hard_link(&precious, &linked).unwrap();
+    assert_eq!(hard_link_count(&precious), Some(2));
+
     let markdown = concat!(
         "# Title\n\n",
         "![a](assets/pic.png)\n\n",
         "![b](assets/pic.png \"assets/pic.png\")\n\n",
         "![c](../outside.png)\n\n",
         "![d](assets/keep.txt)\n\n",
+        "![f](assets/linked.png)\n\n",
         "![e](https://example.com/remote.png)\n",
     );
     let note_path = ws_dir.join("note.md.enc");
@@ -296,10 +304,21 @@ fn test_seal_note_encrypts_existing_images_and_rewrites_links() {
 
     let report = seal_note(note_str.clone(), markdown.into(), password.into(), None, true).unwrap();
 
-    assert_eq!(report.sealed, 1);
+    assert_eq!(report.sealed, 2);
     assert_eq!(report.rekeyed, 0);
-    assert_eq!(report.originals_removed, 1);
+    assert_eq!(report.originals_removed, 2);
     assert_eq!(report.originals_kept, 0);
+
+    // The hard-linked original is removed from the note folder, but the data it shared with
+    // the outside file must not have been zero-overwritten on the way out.
+    assert!(!linked.exists(), "hard-linked original must be unlinked from the note folder");
+    assert_eq!(
+        fs::read(&precious).unwrap(),
+        payload,
+        "a file sharing data through a hard link must never be zero-overwritten"
+    );
+    assert_eq!(hard_link_count(&precious), Some(1));
+    assert!(report.markdown.contains("![f](assets/linked.png.enc)"));
     assert_eq!(report.skipped.len(), 2, "traversal and non-image references are skipped");
 
     // Both inline links are rewritten; the title text and remote URL are left alone.
@@ -358,8 +377,18 @@ fn test_seal_note_rekeys_images_and_rolls_back_on_failure() {
     let good_markdown = format!("# Note\n\n![1.00]({})\n", first);
     seal_note(note_str.clone(), good_markdown.clone(), old_password.into(), None, false).unwrap();
 
+    let assets_dir = temp_dir.join("assets");
+    let file_count = |dir: &std::path::Path| fs::read_dir(dir).unwrap().count();
+    let link_target = |markdown: &str| -> String {
+        markdown.split("](").nth(1).unwrap().split(')').next().unwrap().to_string()
+    };
+    let first_bytes = fs::read(&first_str).unwrap();
+    assert_eq!(file_count(&assets_dir), 2);
+
     // The second image cannot be opened with the old passphrase, so the re-key fails AFTER the
-    // first image was already rewritten. Everything must be put back.
+    // first image was already re-encrypted. A re-key only ever writes new files, so the old
+    // image must be byte-for-byte untouched (this is also the state a crash would leave), and
+    // the half-finished new file must be gone.
     let bad_markdown = format!("# Note\n\n![1.00]({})\n\n![1.00]({})\n", first, foreign);
     let failed = seal_note(
         note_str.clone(),
@@ -370,17 +399,20 @@ fn test_seal_note_rekeys_images_and_rolls_back_on_failure() {
     );
     assert!(failed.is_err());
     assert_eq!(
-        read_encrypted_image_inner(&first_str, old_password).unwrap(),
-        payload,
-        "a failed re-key must restore images to the old passphrase"
+        fs::read(&first_str).unwrap(),
+        first_bytes,
+        "a re-key must never modify the existing encrypted image"
     );
+    assert_eq!(read_encrypted_image_inner(&first_str, old_password).unwrap(), payload);
+    assert_eq!(file_count(&assets_dir), 2, "a failed re-key must not leave new files behind");
     assert_eq!(
         read_encrypted_markdown(note_str.clone(), old_password.into()).unwrap(),
         good_markdown,
         "a failed re-key must leave the note untouched"
     );
 
-    // A clean re-key moves the image and the note to the new passphrase together.
+    // A clean re-key moves the image and the note to the new passphrase together: the image is
+    // written under a new name, the link follows it, and the superseded file is removed.
     let report = seal_note(
         note_str.clone(),
         good_markdown.clone(),
@@ -391,10 +423,93 @@ fn test_seal_note_rekeys_images_and_rolls_back_on_failure() {
     .unwrap();
     assert_eq!(report.rekeyed, 1);
     assert_eq!(report.sealed, 0);
-    assert_eq!(report.markdown, good_markdown);
-    assert_eq!(read_encrypted_image_inner(&first_str, new_password).unwrap(), payload);
-    assert!(read_encrypted_image_inner(&first_str, old_password).is_err());
-    assert_eq!(read_encrypted_markdown(note_str, new_password.into()).unwrap(), good_markdown);
+    let rekeyed_rel = link_target(&report.markdown);
+    assert_ne!(rekeyed_rel, first, "a re-keyed image gets a new file name");
+    assert!(rekeyed_rel.starts_with("assets/img_") && rekeyed_rel.ends_with(".png.enc"));
+    assert!(rekeyed_rel.contains("_k"));
+    let rekeyed_str = temp_dir.join(&rekeyed_rel).to_str().unwrap().to_string();
+    assert_eq!(read_encrypted_image_inner(&rekeyed_str, new_password).unwrap(), payload);
+    assert!(read_encrypted_image_inner(&rekeyed_str, old_password).is_err());
+    assert!(
+        !std::path::Path::new(&first_str).exists(),
+        "the superseded encrypted image is removed once the note points at the new one"
+    );
+    assert_eq!(file_count(&assets_dir), 2);
+    assert_eq!(
+        read_encrypted_markdown(note_str.clone(), new_password.into()).unwrap(),
+        report.markdown
+    );
+
+    // Changing the passphrase again replaces the tag instead of stacking another one.
+    let again = seal_note(
+        note_str.clone(),
+        report.markdown.clone(),
+        "ThirdPassphrase#2028!".into(),
+        Some(new_password.into()),
+        false,
+    )
+    .unwrap();
+    let again_rel = link_target(&again.markdown);
+    assert_ne!(again_rel, rekeyed_rel);
+    assert_eq!(again_rel.len(), rekeyed_rel.len(), "file names must not grow on every re-key");
+    let again_str = temp_dir.join(&again_rel).to_str().unwrap().to_string();
+    assert_eq!(
+        read_encrypted_image_inner(&again_str, "ThirdPassphrase#2028!").unwrap(),
+        payload
+    );
+
+    set_active_workspace_bound(None);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_encrypted_image_is_bound_to_its_file_name() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    let temp_dir = std::env::temp_dir().join("markforge_img_name_test");
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).unwrap();
+    set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
+
+    let note_str = temp_dir.join("vault.md.enc").to_str().unwrap().to_string();
+    let password = "CorrectHorseBatteryStaple#2026!";
+    let payload_a = sample_image_payload();
+    let mut payload_b = sample_image_payload();
+    payload_b.extend_from_slice(b"-SECOND-IMAGE");
+
+    let rel_a =
+        save_encrypted_image(note_str.clone(), payload_a.clone(), "png".into(), password.into())
+            .unwrap();
+    let rel_b =
+        save_encrypted_image(note_str.clone(), payload_b.clone(), "png".into(), password.into())
+            .unwrap();
+    let path_a = temp_dir.join(&rel_a);
+    let path_b = temp_dir.join(&rel_b);
+    let str_a = path_a.to_str().unwrap().to_string();
+    let str_b = path_b.to_str().unwrap().to_string();
+    let bytes_a = fs::read(&path_a).unwrap();
+    let bytes_b = fs::read(&path_b).unwrap();
+
+    // Swap: someone with disk access exchanges two images that share a passphrase.
+    fs::write(&path_a, &bytes_b).unwrap();
+    fs::write(&path_b, &bytes_a).unwrap();
+    assert!(read_encrypted_image_inner(&str_a, password).is_err(), "a swapped image must fail");
+    assert!(read_encrypted_image_inner(&str_b, password).is_err(), "a swapped image must fail");
+
+    // Put back: both open again.
+    fs::write(&path_a, &bytes_a).unwrap();
+    fs::write(&path_b, &bytes_b).unwrap();
+    assert_eq!(read_encrypted_image_inner(&str_a, password).unwrap(), payload_a);
+    assert_eq!(read_encrypted_image_inner(&str_b, password).unwrap(), payload_b);
+
+    // Rename: the same bytes under another name must fail authentication.
+    let renamed = temp_dir.join("assets").join("renamed.png.enc");
+    fs::rename(&path_a, &renamed).unwrap();
+    assert!(
+        read_encrypted_image_inner(renamed.to_str().unwrap(), password).is_err(),
+        "a renamed image must fail"
+    );
+    fs::rename(&renamed, &path_a).unwrap();
+    assert_eq!(read_encrypted_image_inner(&str_a, password).unwrap(), payload_a);
 
     set_active_workspace_bound(None);
     let _ = fs::remove_dir_all(&temp_dir);
