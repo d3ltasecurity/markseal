@@ -73,6 +73,21 @@ writing.
   files encrypted or deleted. Originals are removed only after the encrypted
   copy is verified on disk, and only under the strict-workspace delete rule.
 
+#### Session protection for decrypted notes
+- **Auto-lock.** After a set idle time (default 5 minutes; 1, 5, 15, 30 or
+  never) every decrypted note is locked: unsaved edits are written back
+  encrypted, then the plaintext and passphrase are dropped from app state. The
+  idle check uses wall-clock time, so it still fires after the window was
+  hidden or the machine slept.
+- **Panic key (`Ctrl+Shift+L`).** Does the same immediately and also clears the
+  clipboard. The window is covered before any note is saved or closed.
+- A note that cannot be saved is left open rather than discarded; locking never
+  loses work.
+- **Screen-capture shield.** While a decrypted note or the passphrase dialog is
+  on screen, the window is excluded from capture (`SetWindowDisplayAffinity`
+  with `WDA_EXCLUDEFROMCAPTURE` on Windows), which covers screenshots, screen
+  sharing and Windows Recall. It is on by default and can be turned off.
+
 ### 4. HTML export sanitization
 Exported HTML is generated with `pulldown-cmark` and then sanitized with
 `ammonia`; the document title is HTML-entity-escaped. Script tags and event
@@ -99,6 +114,15 @@ and workspace search to prevent out-of-memory conditions.
   This is stated in the UI.
 - **Dev mode CSP.** The locked production CSP may limit Vite hot-reload during
   `npm run tauri dev`; the shipped binary is unaffected.
+- **The capture shield is not DRM.** It stops ordinary capture tools. Another
+  process running as the same user can switch the flag off, and a camera pointed
+  at the screen is unaffected. It does not protect against malware already on
+  the machine.
+- **Locking drops references, it does not wipe webview memory.** Decrypted text
+  and the session passphrase live in JavaScript memory while a note is open;
+  after a lock they are released for garbage collection, not overwritten.
+- **Auto-lock is idle-based only.** Locking Windows (`Win+L`) does not lock
+  notes immediately; they lock when the idle time runs out.
 - **Image file names and sizes are visible.** Encrypted images keep a
   recognisable name (`img_<time>_<random>.png.enc`) and their size on disk; only
   the contents are protected.

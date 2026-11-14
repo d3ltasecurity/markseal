@@ -578,6 +578,12 @@ body,
   color: var(--text-primary);
 }
 
+.menu-sep {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--border-subtle);
+}
+
 .menu-item .mi-label {
   flex: 1;
   white-space: nowrap;
@@ -1325,6 +1331,72 @@ body,
 .zen-exit:hover,
 .zen-exit:focus-visible {
   opacity: 1;
+}
+
+/* ---------- Vault curtain -------------------------------------------------
+   Opaque on purpose: it hides decrypted text the instant a lock starts. */
+.vault-curtain {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--shell-solid);
+  color: var(--vault-text);
+  font-size: 13px;
+}
+
+.vault-curtain span {
+  color: var(--text-secondary);
+}
+
+/* Confirmation for lock actions. Sits above everything, including focus mode. */
+.lock-toast {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 10px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 13px;
+  box-shadow: var(--shadow-pop);
+  transform: translateX(-50%);
+  animation: toast-in 180ms ease-out;
+  pointer-events: none;
+}
+
+.lock-toast svg {
+  flex: none;
+  color: var(--vault-text);
+}
+
+.lock-toast.tone-error {
+  border-color: var(--danger);
+}
+
+.lock-toast.tone-error svg {
+  color: var(--danger);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 
 /* ---------- Modals (vault, search, palette, confirm) --------------------- */

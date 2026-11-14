@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Crepe } from "@milkdown/crepe";
 import { setCodeMirrorTheme } from "@milkdown/crepe/feature/code-mirror";
 import { oneDark } from "@codemirror/theme-one-dark";
@@ -106,6 +107,9 @@ const SIDEBAR_MAX = 460;
 const SIDEBAR_DEFAULT = 260;
 const MAX_SEARCH_ROWS = 200;
 const EMPTY_STATS: DocStats = { words: 0, chars: 0, lines: 0, minutes: 0 };
+// Idle minutes before decrypted notes are locked again. 0 = never.
+const AUTO_LOCK_CHOICES = [1, 5, 15, 30, 0];
+const AUTO_LOCK_DEFAULT = 5;
 
 const WELCOME_NOTE =
     "# Welcome to MarkForge\n\nA local-first, **zero-knowledge** Markdown editor. Nothing you write leaves this machine.\n\n## Shortcuts\n\n- `Ctrl+K` — command palette\n- `Ctrl+N` — new note\n- `Ctrl+S` — save\n- `Ctrl+L` — encrypt the note with `AES-256-GCM` + `Argon2id`\n- `Ctrl+Shift+F` — search the workspace\n- `Ctrl+E` — export sanitized HTML\n- `Ctrl+P` — print or save as PDF\n- `Ctrl+\\` — focus mode\n\n> Without its passphrase, an encrypted note cannot be recovered.\n";
@@ -162,6 +166,12 @@ function initialSidebarWidth(): number {
   return Number.isFinite(stored) && stored > 0
       ? clamp(stored, SIDEBAR_MIN, SIDEBAR_MAX)
       : SIDEBAR_DEFAULT;
+}
+
+function initialAutoLock(): number {
+  const stored = readStored("markforge.autoLockMinutes");
+  const parsed = stored === null ? NaN : Number(stored);
+  return AUTO_LOCK_CHOICES.includes(parsed) ? parsed : AUTO_LOCK_DEFAULT;
 }
 
 function computeStats(markdown: string): DocStats {
@@ -295,6 +305,18 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   // Bumped to rebuild the editor when a tab's content changes underneath it without a path change.
   const [editorEpoch, setEditorEpoch] = useState(0);
+
+  // Vault session protection
+  const [autoLockMinutes, setAutoLockMinutes] = useState<number>(initialAutoLock);
+  const [captureShield, setCaptureShield] = useState(
+      () => readStored("markforge.captureShield") !== "0"
+  );
+  const [shieldActive, setShieldActive] = useState(false);
+  // Covers the whole window the instant a lock starts, before any note is saved or closed.
+  const [vaultCurtain, setVaultCurtain] = useState(false);
+  // On-screen confirmation for lock actions. The status bar alone is too easy to miss, and it
+  // is hidden in focus mode.
+  const [lockToast, setLockToast] = useState<{ message: string; tone: Tone; id: number } | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   // `id` re-keys the status line so each new message replays its entrance animation.
   const [status, setStatus] = useState<{ message: string; tone: Tone; id: number }>({
@@ -316,8 +338,13 @@ export default function App() {
   const spyFrame = useRef(0);
   const spyLockUntil = useRef(0);
   const savedTimer = useRef(0);
+  const lastActivityRef = useRef(Date.now());
+  const lockingRef = useRef(false);
+  const lockVaultRef = useRef<(reason: "idle" | "panic") => Promise<void>>(async () => {});
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const activeTabPathRef = useRef(activeTabPath);
+  activeTabPathRef.current = activeTabPath;
   const themeRef = useRef(theme);
   themeRef.current = theme;
 
@@ -950,6 +977,182 @@ export default function App() {
     }
   };
 
+  // Locks every decrypted note: the screen is covered first, unsaved edits are written back
+  // encrypted, then the plaintext and passphrases are dropped from app state. "panic" (the
+  // manual shortcut) also clears the clipboard. A note that cannot be saved stays open —
+  // locking must never lose work.
+  const announceLock = (message: string, tone: Tone) => {
+    notify(message, tone);
+    setLockToast((prev) => ({ message, tone, id: (prev?.id ?? 0) + 1 }));
+  };
+
+  // Resolves true only if the clipboard was really emptied. Capped, so a clipboard that never
+  // answers cannot hold up a lock.
+  const clearClipboard = async (): Promise<boolean> => {
+    try {
+      return await Promise.race([
+        navigator.clipboard.writeText("").then(() => true),
+        new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), 800)),
+      ]);
+    } catch {
+      return false;
+    }
+  };
+
+  const lockVault = async (reason: "idle" | "panic") => {
+    if (lockingRef.current) return;
+    const secretTabs = tabsRef.current.filter((t) => t.isEncrypted);
+    if (secretTabs.length === 0) {
+      if (reason === "panic") announceLock("Nothing to lock — no encrypted note is open.", "info");
+      return;
+    }
+    lockingRef.current = true;
+    const startedAt = performance.now();
+    setVaultCurtain(true);
+    try {
+      closeVault();
+      setPaletteOpen(false);
+      setIsSearchOpen(false);
+      setConfirmClosePath(null);
+      setMenuOpen(false);
+
+      const clipboardCleared = reason === "panic" ? await clearClipboard() : false;
+
+      const livePath = crepePathRef.current;
+      let liveMarkdown: string | null = null;
+      if (livePath && crepeRef.current) {
+        try {
+          liveMarkdown = crepeRef.current.getMarkdown();
+        } catch {
+          liveMarkdown = null;
+        }
+      }
+
+      const kept = new Set<string>();
+      let saved = 0;
+      for (const tab of secretTabs) {
+        const isLive = tab.path === livePath && liveMarkdown !== null;
+        const content = isLive ? (liveMarkdown as string) : tab.content;
+        const dirty =
+            tab.isDirty ||
+            (isLive && baselineRef.current !== null && content !== baselineRef.current);
+        if (!dirty) continue;
+        if (!tab.sessionPassword) {
+          kept.add(tab.path);
+          continue;
+        }
+        try {
+          await invoke("save_encrypted_markdown", {
+            filePath: tab.path,
+            content,
+            password: tab.sessionPassword,
+          });
+          saved += 1;
+        } catch {
+          kept.add(tab.path);
+        }
+      }
+
+      const locked = new Set(secretTabs.filter((t) => !kept.has(t.path)).map((t) => t.path));
+      const remaining = tabsRef.current.filter((t) => !locked.has(t.path));
+      if (remaining.length === 0) {
+        untitledCounter.current += 1;
+        const name = `Untitled-${untitledCounter.current}.md`;
+        setTabs([{ path: name, name, content: "# New Note\n", isDirty: false, isEncrypted: false }]);
+        setActiveTabPath(name);
+      } else {
+        setTabs(remaining);
+        if (locked.has(activeTabPathRef.current)) {
+          setActiveTabPath(remaining[remaining.length - 1].path);
+        }
+      }
+
+      // A manual lock holds the cover for a moment, so it is obvious that it happened.
+      if (reason === "panic") {
+        const shown = performance.now() - startedAt;
+        if (shown < 450) await new Promise((resolve) => window.setTimeout(resolve, 450 - shown));
+      }
+
+      const count = locked.size;
+      const notes = `${count} note${count === 1 ? "" : "s"}`;
+      const savedNote = saved > 0 ? ` · ${saved} saved first` : "";
+      if (kept.size > 0) {
+        announceLock(
+            `Locked ${notes}, but ${kept.size} could not be saved and stay${kept.size === 1 ? "s" : ""} open.`,
+            "error"
+        );
+      } else if (reason === "idle") {
+        announceLock(`Auto-locked ${notes} after ${autoLockMinutes} min idle${savedNote}`, "vault");
+      } else {
+        announceLock(
+            clipboardCleared
+                ? `Locked ${notes} and cleared the clipboard${savedNote}`
+                : `Locked ${notes}${savedNote} · clipboard could not be cleared`,
+            "vault"
+        );
+      }
+    } catch (err) {
+      // Never leave the cover up or the lock stuck "in progress" after an unexpected error.
+      announceLock(`Lock did not finish: ${String(err)}`, "error");
+    } finally {
+      setVaultCurtain(false);
+      lockingRef.current = false;
+    }
+  };
+  lockVaultRef.current = lockVault;
+
+  useEffect(() => {
+    if (!lockToast) return;
+    const timer = window.setTimeout(() => setLockToast(null), 3200);
+    return () => window.clearTimeout(timer);
+  }, [lockToast]);
+
+  // Any key, click, scroll or mouse movement counts as activity.
+  useEffect(() => {
+    const bump = () => {
+      lastActivityRef.current = Date.now();
+    };
+    const events = ["keydown", "pointerdown", "pointermove", "wheel"];
+    events.forEach((type) => window.addEventListener(type, bump, { capture: true, passive: true }));
+    return () => events.forEach((type) => window.removeEventListener(type, bump, true));
+  }, []);
+
+  // Idle check runs off wall-clock time, so it still fires correctly after the window was
+  // hidden, minimised or the machine slept.
+  useEffect(() => {
+    writeStored("markforge.autoLockMinutes", String(autoLockMinutes));
+    if (autoLockMinutes === 0) return;
+    const limit = autoLockMinutes * 60_000;
+    const timer = window.setInterval(() => {
+      if (Date.now() - lastActivityRef.current >= limit) void lockVaultRef.current("idle");
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [autoLockMinutes]);
+
+  // Screen-capture shield: while a decrypted note (or the passphrase dialog) is on screen, the
+  // window is excluded from screenshots, screen sharing and Windows Recall.
+  const hasDecryptedNote = tabs.some((t) => t.isEncrypted);
+  const wantShield = captureShield && (hasDecryptedNote || vaultModal.mode !== null);
+  useEffect(() => {
+    writeStored("markforge.captureShield", captureShield ? "1" : "0");
+  }, [captureShield]);
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    let cancelled = false;
+    getCurrentWindow()
+        .setContentProtected(wantShield)
+        .then(() => {
+          if (!cancelled) setShieldActive(wantShield);
+        })
+        .catch((err: unknown) => {
+          console.warn("setContentProtected failed:", err);
+          if (!cancelled) setShieldActive(false);
+        });
+    return () => {
+      cancelled = true;
+    };
+  }, [wantShield]);
+
   const handleCloseTab = (pathToClose: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
     const tab = tabs.find((t) => t.path === pathToClose);
@@ -1108,6 +1311,35 @@ export default function App() {
         { id: "close", group: "Actions", label: "Close tab", shortcut: "Ctrl+W", icon: <X size={16} />, run: () => handleCloseTab(activeTabPath) },
         { id: "zen", group: "View", label: zen ? "Exit focus mode" : "Enter focus mode", keywords: "zen distraction free", shortcut: "Ctrl+\\", icon: zen ? <Minimize2 size={16} /> : <Maximize2 size={16} />, run: () => setZen((z) => !z) },
         { id: "sidebar", group: "View", label: sidebarCollapsed ? "Show sidebar" : "Hide sidebar", keywords: "explorer outline panel", shortcut: "Ctrl+Shift+E", icon: <PanelLeft size={16} />, run: () => setSidebarCollapsed((c) => !c) },
+        { id: "lock-now", group: "Security", label: "Lock all notes and clear clipboard", keywords: "panic vault close hide boss", shortcut: "Ctrl+Shift+L", icon: <LockKeyhole size={16} />, run: () => void lockVault("panic") },
+        ...AUTO_LOCK_CHOICES.map<PaletteCommand>((minutes) => ({
+          id: `autolock-${minutes}`,
+          group: "Security",
+          label:
+              (minutes === 0 ? "Auto-lock: never" : `Auto-lock: after ${minutes} minute${minutes === 1 ? "" : "s"} idle`) +
+              (minutes === autoLockMinutes ? " (current)" : ""),
+          keywords: "idle timeout timer vault",
+          icon: <Lock size={16} />,
+          run: () => {
+            setAutoLockMinutes(minutes);
+            notify(minutes === 0 ? "Auto-lock is off." : `Decrypted notes lock after ${minutes} min idle.`);
+          },
+        })),
+        {
+          id: "shield",
+          group: "Security",
+          label: captureShield ? "Screen-capture shield: turn off" : "Screen-capture shield: turn on",
+          keywords: "screenshot recall screen share recording privacy",
+          icon: <EyeOff size={16} />,
+          run: () => {
+            setCaptureShield((on) => !on);
+            notify(
+                captureShield
+                    ? "Screen-capture shield is off — decrypted notes can be screenshotted."
+                    : "Screen-capture shield is on while a decrypted note is open."
+            );
+          },
+        },
         ...THEMES.map<PaletteCommand>((t) => ({
           id: `theme-${t.id}`,
           group: "Theme",
@@ -1250,6 +1482,8 @@ export default function App() {
       return;
     } else if (e.shiftKey && key === "f") {
       openSearch();
+    } else if (e.shiftKey && key === "l") {
+      void lockVault("panic");
     } else if (e.shiftKey && key === "e") {
       setSidebarCollapsed((c) => !c);
     } else if (e.shiftKey) {
@@ -1394,6 +1628,12 @@ export default function App() {
                       <Printer size={15} />
                       <span className="mi-label">Print / save as PDF</span>
                       <span className="kbd">Ctrl+P</span>
+                    </button>
+                    <div className="menu-sep" role="separator" />
+                    <button className="menu-item" role="menuitem" onClick={() => runMenu(() => void lockVault("panic"))}>
+                      <LockKeyhole size={15} />
+                      <span className="mi-label">Lock all notes</span>
+                      <span className="kbd">Ctrl+Shift+L</span>
                     </button>
                   </div>
               )}
@@ -1609,9 +1849,21 @@ export default function App() {
             <span>{stats.minutes === 0 ? "—" : <>~<b>{stats.minutes}</b> min read</>}</span>
           </div>
           {activeTab?.isEncrypted ? (
-              <span className="posture is-vault" title="Zero-Knowledge Vault (AES-256-GCM / Argon2id 64MiB)">
+              <span
+                  className="posture is-vault"
+                  title={`Zero-Knowledge Vault (AES-256-GCM / Argon2id 64MiB) · ${
+                      autoLockMinutes === 0 ? "auto-lock off" : `auto-locks after ${autoLockMinutes} min idle`
+                  } · ${shieldActive ? "hidden from screenshots and screen sharing" : "screen-capture shield off"}`}
+              >
                 <ShieldCheck size={12} />
                 AES-256-GCM · Argon2id
+                {shieldActive && (
+                    <>
+                      {" · "}
+                      <EyeOff size={12} />
+                      Shielded
+                    </>
+                )}
               </span>
           ) : (
               <span className="posture" title="This note is stored as plain Markdown on disk">
@@ -1620,6 +1872,21 @@ export default function App() {
               </span>
           )}
         </footer>
+
+        {/* Shown the instant a lock starts, so nothing secret stays on screen while notes save. */}
+        {vaultCurtain && (
+            <div className="vault-curtain" role="status">
+              <LockKeyhole size={28} />
+              <span>Locking…</span>
+            </div>
+        )}
+
+        {lockToast && (
+            <div key={lockToast.id} className={`lock-toast tone-${lockToast.tone}`} role="status" aria-live="assertive">
+              <LockKeyhole size={15} />
+              <span>{lockToast.message}</span>
+            </div>
+        )}
 
         {/* Command Palette (Ctrl+K) */}
         {paletteOpen && (
