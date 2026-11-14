@@ -88,11 +88,24 @@ pub fn set_workspace_root_inner(dir_path: &str) -> Result<PathBuf, String> {
 
 pub fn validate_strict_workspace_path(path_str: &str) -> Result<PathBuf, String> {
     let resolved = validate_secure_path(path_str, Some(""))?;
-    if let Some(canon_ws) = get_active_workspace_bound() {
-        if !resolved.starts_with(&canon_ws) {
-            return Err(
-                "Security Error: Target path escapes the active workspace boundary.".into(),
-            );
+    match get_active_workspace_bound() {
+        // A workspace is open: the target must be inside it. The dialog allowlist is ignored.
+        Some(canon_ws) => {
+            if !resolved.starts_with(&canon_ws) {
+                return Err(
+                    "Security Error: Target path escapes the active workspace boundary.".into(),
+                );
+            }
+        }
+        // No workspace is open: "no boundary" must not mean "delete anything". Only a path the
+        // user picked in a file dialog this session (or a file in that note's folder) qualifies.
+        None => {
+            if !is_dialog_authorized(&resolved) {
+                return Err(
+                    "Security Error: No workspace is open and this path was not chosen in a file dialog."
+                        .into(),
+                );
+            }
         }
     }
     Ok(resolved)

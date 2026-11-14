@@ -205,6 +205,47 @@ fn test_delete_outside_workspace_always_rejected() {
     clear_dialog_authorized_paths();
     let _ = fs::remove_dir_all(&base_temp);
 }
+
+#[test]
+fn test_delete_without_workspace_requires_dialog_authorization() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    clear_dialog_authorized_paths();
+    set_active_workspace_bound(None);
+
+    let base_temp = std::env::temp_dir().join("mf_test_delete_no_workspace");
+    let _ = fs::remove_dir_all(&base_temp);
+    let note_dir = base_temp.join("notes");
+    let other_dir = base_temp.join("elsewhere");
+    fs::create_dir_all(&note_dir).unwrap();
+    fs::create_dir_all(&other_dir).unwrap();
+
+    let victim = note_dir.join("standalone.md");
+    fs::write(&victim, "# Not chosen in any dialog").unwrap();
+    let victim_str = victim.to_str().unwrap().to_string();
+
+    // No workspace and no dialog authorization: the delete must be refused.
+    assert!(
+        delete_note_file(victim_str.clone()).is_err(),
+        "with no workspace open, an un-authorized path must not be deletable"
+    );
+    assert!(victim.exists(), "the un-authorized file must still be on disk");
+    assert!(secure_shred_file(victim_str.clone()).is_err());
+    assert!(victim.exists());
+
+    // Authorizing a path in a different folder does not help.
+    let unrelated = other_dir.join("picked.md");
+    authorize_dialog_path_inner(unrelated.to_str().unwrap()).unwrap();
+    assert!(delete_note_file(victim_str.clone()).is_err());
+    assert!(victim.exists());
+
+    // Once the user has picked this note in a dialog, deleting it works.
+    authorize_dialog_path_inner(&victim_str).unwrap();
+    assert!(delete_note_file(victim_str.clone()).is_ok());
+    assert!(!victim.exists(), "a dialog-authorized note must be deletable");
+
+    clear_dialog_authorized_paths();
+    let _ = fs::remove_dir_all(&base_temp);
+}
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)
 }

@@ -44,11 +44,16 @@ Scope is granted at runtime only: the opened workspace folder, and for a note
 opened or read outside it, that note's own folder and its immediate subfolders
 (not recursive; hidden folders and symlinked folders are skipped).
 
-### 2. Deletion is strictly workspace-only
-`delete_note_file` and `secure_shred_file` use `validate_strict_workspace_path`
-and ignore the dialog allowlist entirely. A file Save-As'd outside the workspace
-can never be deleted or overwritten by the app, even after it was authorized for
-writing.
+### 2. Deletion follows a stricter, two-branch rule
+`delete_note_file` and `secure_shred_file` use `validate_strict_workspace_path`:
+- **A workspace is open:** the file must be inside that workspace. The dialog
+  allowlist is ignored, so a file Save-As'd outside the workspace can never be
+  deleted by the app, even after it was authorized for writing.
+- **No workspace is open:** the file must be covered by the dialog allowlist
+  (a path the user picked in a native dialog this session, or a file in that
+  note's folder or its immediate subfolders). This lets a standalone note be
+  encrypted with "delete original"; any other path is refused. "No workspace"
+  never means "delete anything".
 
 The zero-overwrite before deletion is skipped for a file that has more than one
 hard link (or whose link count cannot be read); such a file is only unlinked.
@@ -154,6 +159,13 @@ and workspace search to prevent out-of-memory conditions.
 - **What name binding does not stop.** Someone with write access to the disk can
   still put back an older copy of the same image file, or exchange two images
   that have the same file name in different folders and the same passphrase.
+  Both are outside the scope of the v1 image format.
+- **The allowlist trusts the app's own interface.** The backend records a path
+  as "picked in a dialog" when the interface tells it so; it cannot check that a
+  dialog was really shown. The same holds for the workspace folder. These rules
+  stop mistakes and crafted note content, not script that is already running
+  inside the app window. The Content Security Policy is the control against
+  that.
 - **Leftover files after a crash.** If the app dies while a note is being
   encrypted or re-keyed, unreferenced `.enc` files can remain in the note's
   folder. They are ciphertext and can be deleted by hand.
@@ -188,9 +200,10 @@ The pre-release hardening history is in git:
 - `82bad79` — session dialog allowlist, strict delete confinement, production
   CSP, license + documentation.
 
-Covered by 11 Rust integration tests in `src-tauri/tests/security_tests.rs`
+Covered by 12 Rust integration tests in `src-tauri/tests/security_tests.rs`
 (encryption + tamper detection, path traversal / null byte, workspace
-confinement, dialog-allowlist allow/deny, strict delete, HTML XSS stripping,
+confinement, dialog-allowlist allow/deny, strict delete with a workspace open,
+delete refused with no workspace open unless dialog-authorized, HTML XSS stripping,
 image-paste contract, encrypted images never in plaintext on disk, images bound
 to their file name (swap and rename fail), sealing a note's existing images with
 crafted-link refusal and no overwrite through a hard link, re-key that never
