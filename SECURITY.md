@@ -33,6 +33,11 @@ On top of that, access is gated two ways:
   Save-As and Export can write outside the workspace — but *only* to
   user-chosen locations.
 
+A path that is neither inside the open workspace nor covered by the dialog
+allowlist is refused. This also holds when **no workspace is open**: then only
+dialog-picked paths are reachable, and with an empty allowlist every file
+command fails.
+
 The allowlist is **folder-scoped**: authorizing a note also authorizes its
 sibling files and its `assets/` subfolder, so note-relative images
 (`<note_dir>/assets/img_*.png`) load correctly. It never widens to the whole
@@ -164,8 +169,9 @@ and workspace search to prevent out-of-memory conditions.
   as "picked in a dialog" when the interface tells it so; it cannot check that a
   dialog was really shown. The same holds for the workspace folder. These rules
   stop mistakes and crafted note content, not script that is already running
-  inside the app window. The Content Security Policy is the control against
-  that.
+  inside the app window. The Content Security Policy (`script-src 'self'`) is
+  the control against that. Opening the dialogs from the Rust side, so the
+  backend sees the user's choice itself, is planned for a later release.
 - **Leftover files after a crash.** If the app dies while a note is being
   encrypted or re-keyed, unreferenced `.enc` files can remain in the note's
   folder. They are ciphertext and can be deleted by hand.
@@ -200,9 +206,10 @@ The pre-release hardening history is in git:
 - `82bad79` — session dialog allowlist, strict delete confinement, production
   CSP, license + documentation.
 
-Covered by 12 Rust integration tests in `src-tauri/tests/security_tests.rs`
+Covered by 13 Rust integration tests in `src-tauri/tests/security_tests.rs`
 (encryption + tamper detection, path traversal / null byte, workspace
-confinement, dialog-allowlist allow/deny, strict delete with a workspace open,
+confinement, dialog-allowlist allow/deny, no file access with no workspace open
+and nothing dialog-authorized, strict delete with a workspace open,
 delete refused with no workspace open unless dialog-authorized, HTML XSS stripping,
 image-paste contract, encrypted images never in plaintext on disk, images bound
 to their file name (swap and rename fail), sealing a note's existing images with

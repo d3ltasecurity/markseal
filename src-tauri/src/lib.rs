@@ -160,10 +160,21 @@ pub fn validate_secure_path(
         if is_dialog_authorized(&resolved_path) {
             return Ok(resolved_path);
         }
-        if let Some(canon_ws) = get_active_workspace_bound() {
-            if !resolved_path.starts_with(&canon_ws) {
+        match get_active_workspace_bound() {
+            Some(canon_ws) => {
+                if !resolved_path.starts_with(&canon_ws) {
+                    return Err(
+                        "Security Error: Target path escapes the active workspace boundary."
+                            .into(),
+                    );
+                }
+            }
+            // No workspace open and not picked in a dialog: there is nothing that authorizes
+            // this path, so it is refused rather than treated as unrestricted.
+            None => {
                 return Err(
-                    "Security Error: Target path escapes the active workspace boundary.".into(),
+                    "Security Error: No workspace is open and this path was not chosen in a file dialog."
+                        .into(),
                 );
             }
         }

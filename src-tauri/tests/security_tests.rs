@@ -207,6 +207,53 @@ fn test_delete_outside_workspace_always_rejected() {
 }
 
 #[test]
+fn test_no_workspace_and_no_dialog_means_no_file_access() {
+    let _guard = TEST_MUTEX.lock().unwrap();
+    clear_dialog_authorized_paths();
+    set_active_workspace_bound(None);
+
+    let base_temp = std::env::temp_dir().join("mf_test_no_workspace_access");
+    let _ = fs::remove_dir_all(&base_temp);
+    let note_dir = base_temp.join("notes");
+    let other_dir = base_temp.join("elsewhere");
+    fs::create_dir_all(&note_dir).unwrap();
+    fs::create_dir_all(&other_dir).unwrap();
+
+    let existing = note_dir.join("private.md");
+    fs::write(&existing, "# Private").unwrap();
+    let existing_str = existing.to_str().unwrap().to_string();
+    let new_md = note_dir.join("planted.md").to_str().unwrap().to_string();
+    let new_enc = note_dir.join("planted.md.enc").to_str().unwrap().to_string();
+    let new_html = note_dir.join("planted.html").to_str().unwrap().to_string();
+
+    // Nothing authorizes these paths: every read and write must be refused.
+    assert!(validate_secure_path(&existing_str, None).is_err());
+    assert!(read_markdown_file(existing_str.clone()).is_err());
+    assert!(is_encrypted_note(existing_str.clone()).is_err());
+    assert!(save_markdown_file(existing_str.clone(), "# Overwritten".into()).is_err());
+    assert!(save_markdown_file(new_md.clone(), "# Planted".into()).is_err());
+    assert!(save_encrypted_markdown(new_enc.clone(), "# Secret".into(), "passphrase".into()).is_err());
+    assert!(export_to_html(new_html.clone(), "# HTML".into(), "Title".into(), "dark".into()).is_err());
+    assert_eq!(fs::read_to_string(&existing).unwrap(), "# Private", "the file must be untouched");
+    assert!(!std::path::Path::new(&new_md).exists());
+    assert!(!std::path::Path::new(&new_enc).exists());
+    assert!(!std::path::Path::new(&new_html).exists());
+
+    // A dialog pick in a different folder does not open this one.
+    authorize_dialog_path_inner(other_dir.join("picked.md").to_str().unwrap()).unwrap();
+    assert!(read_markdown_file(existing_str.clone()).is_err());
+    assert!(save_markdown_file(new_md.clone(), "# Planted".into()).is_err());
+
+    // A dialog pick of the note itself does.
+    authorize_dialog_path_inner(&existing_str).unwrap();
+    assert_eq!(read_markdown_file(existing_str.clone()).unwrap(), "# Private");
+    assert!(save_markdown_file(existing_str.clone(), "# Edited".into()).is_ok());
+
+    clear_dialog_authorized_paths();
+    let _ = fs::remove_dir_all(&base_temp);
+}
+
+#[test]
 fn test_delete_without_workspace_requires_dialog_authorization() {
     let _guard = TEST_MUTEX.lock().unwrap();
     clear_dialog_authorized_paths();
