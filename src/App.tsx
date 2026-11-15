@@ -116,7 +116,7 @@ const HIDDEN_LOCK_MS = 60_000;
 type LockReason = "idle" | "panic" | "hidden";
 
 const WELCOME_NOTE =
-    "# Welcome to MarkForge\n\nA local-first, **zero-knowledge** Markdown editor. Nothing you write leaves this machine.\n\n## Shortcuts\n\n- `Ctrl+K` — command palette\n- `Ctrl+N` — new note\n- `Ctrl+S` — save\n- `Ctrl+L` — encrypt the note with `AES-256-GCM` + `Argon2id`\n- `Ctrl+Shift+F` — search the workspace\n- `Ctrl+E` — export sanitized HTML\n- `Ctrl+P` — print or save as PDF\n- `Ctrl+\\` — focus mode\n\n> Without its passphrase, an encrypted note cannot be recovered.\n";
+    "# Welcome to Markseal\n\nA local-first, **zero-knowledge** Markdown editor. Nothing you write leaves this machine.\n\n## Shortcuts\n\n- `Ctrl+K` — command palette\n- `Ctrl+N` — new note\n- `Ctrl+S` — save\n- `Ctrl+L` — encrypt the note with `AES-256-GCM` + `Argon2id`\n- `Ctrl+Shift+F` — search the workspace\n- `Ctrl+E` — export sanitized HTML\n- `Ctrl+P` — print or save as PDF\n- `Ctrl+\\` — focus mode\n\n> Without its passphrase, an encrypted note cannot be recovered.\n";
 
 const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
 const isDiskPath = (path: string) => path.includes("/") || path.includes("\\");
@@ -161,19 +161,19 @@ function writeStored(key: string, value: string) {
 }
 
 function initialTheme(): ThemeName {
-  const stored = readStored("markforge.theme");
+  const stored = readStored("markseal.theme");
   return THEMES.some((t) => t.id === stored) ? (stored as ThemeName) : "cobalt";
 }
 
 function initialSidebarWidth(): number {
-  const stored = Number(readStored("markforge.sidebarWidth"));
+  const stored = Number(readStored("markseal.sidebarWidth"));
   return Number.isFinite(stored) && stored > 0
       ? clamp(stored, SIDEBAR_MIN, SIDEBAR_MAX)
       : SIDEBAR_DEFAULT;
 }
 
 function initialAutoLock(): number {
-  const stored = readStored("markforge.autoLockMinutes");
+  const stored = readStored("markseal.autoLockMinutes");
   const parsed = stored === null ? NaN : Number(stored);
   return AUTO_LOCK_CHOICES.includes(parsed) ? parsed : AUTO_LOCK_DEFAULT;
 }
@@ -274,7 +274,7 @@ export default function App() {
   // Layout state
   const [zen, setZen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
-      () => readStored("markforge.sidebarCollapsed") === "1"
+      () => readStored("markseal.sidebarCollapsed") === "1"
   );
   const [sidebarWidth, setSidebarWidth] = useState<number>(initialSidebarWidth);
   const [isResizing, setIsResizing] = useState(false);
@@ -313,7 +313,7 @@ export default function App() {
   // Vault session protection
   const [autoLockMinutes, setAutoLockMinutes] = useState<number>(initialAutoLock);
   const [captureShield, setCaptureShield] = useState(
-      () => readStored("markforge.captureShield") !== "0"
+      () => readStored("markseal.captureShield") !== "0"
   );
   const [shieldActive, setShieldActive] = useState(false);
   // Covers the whole window the instant a lock starts, before any note is saved or closed.
@@ -481,7 +481,7 @@ export default function App() {
             const loading = document.createElement("div");
             loading.className = "mermaid-preview-loading";
             loading.textContent = "Rendering diagram…";
-            const id = `markforge-mermaid-${++mermaidIdCounter}`;
+            const id = `markseal-mermaid-${++mermaidIdCounter}`;
             const dark = isThemeDark(themeRef.current);
 
             void import("mermaid")
@@ -593,7 +593,7 @@ export default function App() {
   // Live theme switch: CSS variables repaint the editor; only CodeMirror's syntax palette
   // needs an explicit swap. The Milkdown instance is never recreated.
   useEffect(() => {
-    writeStored("markforge.theme", theme);
+    writeStored("markseal.theme", theme);
     try {
       crepeRef.current?.editor.action(setCodeMirrorTheme(isThemeDark(theme) ? oneDark : []));
     } catch {
@@ -602,11 +602,11 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    writeStored("markforge.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+    writeStored("markseal.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
   }, [sidebarCollapsed]);
 
   useEffect(() => {
-    if (!isResizing) writeStored("markforge.sidebarWidth", String(sidebarWidth));
+    if (!isResizing) writeStored("markseal.sidebarWidth", String(sidebarWidth));
   }, [sidebarWidth, isResizing]);
 
   useEffect(() => {
@@ -874,7 +874,7 @@ export default function App() {
       if (!encPath.includes("/") && !encPath.includes("\\")) {
         const chosen = await save({
           defaultPath: `${activeTab.name.replace(/\.md$/i, "")}.md.enc`,
-          filters: [{ name: "MarkForge Encrypted Vault", extensions: ["enc"] }],
+          filters: [{ name: "Markseal Encrypted Vault", extensions: ["enc"] }],
         });
         if (!chosen) return;
         encPath = chosen;
@@ -1126,7 +1126,7 @@ export default function App() {
   // Idle check runs off wall-clock time, so it still fires correctly after the window was
   // hidden, minimised or the machine slept.
   useEffect(() => {
-    writeStored("markforge.autoLockMinutes", String(autoLockMinutes));
+    writeStored("markseal.autoLockMinutes", String(autoLockMinutes));
     if (autoLockMinutes === 0) return;
     const limit = autoLockMinutes * 60_000;
     const timer = window.setInterval(() => {
@@ -1167,7 +1167,7 @@ export default function App() {
   const hasDecryptedNote = tabs.some((t) => t.isEncrypted);
   const wantShield = captureShield && (hasDecryptedNote || vaultModal.mode !== null);
   useEffect(() => {
-    writeStored("markforge.captureShield", captureShield ? "1" : "0");
+    writeStored("markseal.captureShield", captureShield ? "1" : "0");
   }, [captureShield]);
   useEffect(() => {
     if (!IS_NATIVE) return;
@@ -1592,7 +1592,7 @@ export default function App() {
             <span className="brand-mark">
               <Zap size={14} strokeWidth={2.4} />
             </span>
-            <span className="brand-name">MarkForge</span>
+            <span className="brand-name">Markseal</span>
           </div>
 
           <div className="tb-spacer" />

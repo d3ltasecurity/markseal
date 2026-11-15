@@ -1,6 +1,6 @@
-# MarkForge Security Model
+# Markseal Security Model
 
-MarkForge is a local-first, offline Markdown editor. This document describes its
+Markseal is a local-first, offline Markdown editor. This document describes its
 threat model, the enforced security boundaries, known limitations, and how to
 report a vulnerability.
 
@@ -12,7 +12,7 @@ report a vulnerability.
 - **Untrusted:** the *content* of any note, pasted image, or file opened in the
   editor. Markdown content is never granted authority over the filesystem, and
   rendered HTML is sanitized.
-- **Out of scope:** multi-user / network sharing (MarkForge is single-user and
+- **Out of scope:** multi-user / network sharing (Markseal is single-user and
   offline) and OS-level attackers who already have the user's filesystem rights.
 
 ## Enforced boundaries
@@ -80,6 +80,10 @@ outside it overwritten.
   ciphertext), with its own random salt and nonce and the same Argon2id
   parameters. It is decrypted in memory by `read_encrypted_image` and shown from
   a `blob:` URL; the plaintext image never touches the disk.
+- The format tags `MARKFORGE_ENC_V1` and `MARKFORGE_IMG_V1` carry the project's
+  earlier name (MarkForge). They are part of the file format and of what is
+  authenticated, so they stay as they are; changing them would make existing
+  encrypted notes unreadable.
 - The AAD of an image is its header plus its own file name. The header keeps
   images in a separate domain from notes, so a note envelope cannot be replayed
   as an image or the reverse. The file name means an encrypted image cannot be

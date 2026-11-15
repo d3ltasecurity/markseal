@@ -203,7 +203,7 @@ pub fn atomic_write_bytes(target_path: &Path, data: &[u8]) -> Result<(), String>
     let file_name = target_path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("markforge_note");
+        .unwrap_or("markseal_note");
 
     let mut rand_suffix = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut rand_suffix);
@@ -608,7 +608,7 @@ pub mod commands {
         let raw = fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))?;
         let parts: Vec<&str> = raw.trim().split(':').collect();
         if parts.len() != 4 || parts[0] != ENC_HEADER {
-            return Err("Invalid or tampered MarkForge encrypted file header.".into());
+            return Err("Invalid or tampered Markseal encrypted file header.".into());
         }
 
         let salt_vec = BASE64
@@ -733,7 +733,7 @@ pub mod commands {
         file_name: &str,
     ) -> Result<Zeroizing<Vec<u8>>, String> {
         if raw.len() < IMAGE_ENVELOPE_OVERHEAD || raw[..16] != IMG_HEADER[..] {
-            return Err("Invalid or tampered MarkForge encrypted image header.".into());
+            return Err("Invalid or tampered Markseal encrypted image header.".into());
         }
         let mut salt = [0u8; 16];
         salt.copy_from_slice(&raw[16..32]);
@@ -1341,5 +1341,5 @@ pub fn run() {
             commands::export_to_html
         ])
         .run(tauri::generate_context!())
-        .expect("error while running MarkForge application");
+        .expect("error while running Markseal application");
 }

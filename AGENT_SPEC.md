@@ -1,4 +1,4 @@
-# Master Specification: MarkForge (Windows Tauri v2 + Milkdown WYSIWYG Editor)
+# Master Specification: Markseal (Windows Tauri v2 + Milkdown WYSIWYG Editor)
 
 ## Objective
 Build, scaffold, and verify a high-performance Windows desktop Markdown editor using **Tauri v2 (Rust)**, **React 18 (TypeScript)**, and **Milkdown Crepe (`@milkdown/crepe`)**. It must support true inline WYSIWYG editing, a multi-tab workspace, folder tree browsing, automatic screenshot pasting (`Ctrl+V`), and a 3-mode view switcher (WYSIWYG, Split View, Read-Only Lock).

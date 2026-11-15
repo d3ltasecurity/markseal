@@ -1,6 +1,6 @@
-# MarkForge
+# Markseal
 
-MarkForge is a hardened, local-first markdown note editor and encrypted personal vault built with **Tauri v2**, **React 19**, **TypeScript**, and **Milkdown Crepe**.
+Markseal is a hardened, local-first markdown note editor and encrypted personal vault built with **Tauri v2**, **React 19**, **TypeScript**, and **Milkdown Crepe**.
 
 ---
 
@@ -18,7 +18,7 @@ MarkForge is a hardened, local-first markdown note editor and encrypted personal
 
 ## Architecture
 
-MarkForge uses a modular architecture dividing user interface from systems-level I/O:
+Markseal uses a modular architecture dividing user interface from systems-level I/O:
 
 - **Frontend**: React 19, TypeScript, Vite, Milkdown Crepe, Lucide React icons, and tailored CSS variables.
 - **Backend (Rust / Tauri v2)**: Native window management, secure filesystem operations, cryptographic primitives, and asset protocol handling.
@@ -36,7 +36,7 @@ flowchart LR
 
 ## Security Model & Hardening
 
-MarkForge is designed with defense-in-depth security principles:
+Markseal is designed with defense-in-depth security principles:
 
 ### 1. Cryptographic Specifications
 - **Cipher**: AES-256-GCM (Galois/Counter Mode) providing authenticated encryption and tamper detection.
@@ -48,7 +48,7 @@ MarkForge is designed with defense-in-depth security principles:
 - **Confinement**: Path canonicalization resolves all symlinks and verifies that target files reside strictly within the active workspace root.
 - **Traversal Prevention**: Relative parent segments (`..`) and null bytes (`\0`) are rejected unconditionally.
 - **Session Allowlist**: When opening or saving a file outside the workspace via native system dialogs ("Save As" or "Export HTML"), the canonical path is recorded in a temporary in-memory session allowlist.
-- **Strict Deletion Boundary**: Destructive deletion operations (`delete_note_file`) enforce strict workspace confinement and deliberately ignore the session allowlist; files outside the active workspace cannot be deleted through MarkForge.
+- **Strict Deletion Boundary**: Destructive deletion operations (`delete_note_file`) enforce strict workspace confinement and deliberately ignore the session allowlist; files outside the active workspace cannot be deleted through Markseal.
 
 ### 3. Atomic File Writes
 - All note saves, encrypted exports, and pasted assets are written via a temporary sibling file (`.<filename>.<timestamp>.tmp`) with synchronous flushing to disk (`sync_all()`) before an atomic rename, preventing data corruption during unexpected power cuts or crashes.
@@ -61,7 +61,7 @@ MarkForge is designed with defense-in-depth security principles:
 - **Important limitation**: On wear-leveled flash media (SSDs, NVMe drives) or copy-on-write filesystems (NTFS Volume Shadow Copies, APFS, Btrfs, ZFS), physical blocks may persist in storage controller wear-leveling translation layers until overwritten or cleared by TRIM/garbage collection. For complete forensic data eradication, full-disk encryption (e.g., BitLocker, FileVault, LUKS) is recommended.
 
 ### 6. Production Content Security Policy (CSP)
-- MarkForge enforces a strict Content Security Policy in production builds:
+- Markseal enforces a strict Content Security Policy in production builds:
   ```text
   default-src 'self';
   img-src 'self' asset: http://asset.localhost https://asset.localhost data: blob:;
@@ -109,5 +109,5 @@ npm run tauri build
 
 ## License
 
-MarkForge is licensed under the [MIT License](LICENSE).
-Copyright (c) 2026 MarkForge Contributors.
+Markseal is licensed under the [MIT License](LICENSE).
+Copyright (c) 2026 Markseal Contributors.

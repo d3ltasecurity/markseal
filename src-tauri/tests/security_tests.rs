@@ -1,4 +1,4 @@
-use markforge_lib::*;
+use markseal_lib::*;
 use std::fs;
 use std::sync::Mutex;
 
@@ -11,7 +11,7 @@ fn test_hardened_encryption_and_tamper_detection() {
     let _ = fs::create_dir_all(&temp_dir);
     set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
 
-    let test_file = temp_dir.join("markforge_hardened_vault.md.enc");
+    let test_file = temp_dir.join("markseal_hardened_vault.md.enc");
     let path_str = test_file.to_str().unwrap().to_string();
 
     let secret_note = "# Top Secret Vault\nZero-Knowledge Unicode Test: 🔐 🚀 ₹100%";
@@ -42,7 +42,7 @@ fn test_path_traversal_null_byte_and_workspace_confinement() {
     assert!(validate_secure_path("C:\\temp\\note.md\0.txt", None).is_err());
 
     // Test active workspace confinement blocks outside absolute paths
-    let temp_ws = std::env::temp_dir().join("markforge_ws_bound_test");
+    let temp_ws = std::env::temp_dir().join("markseal_ws_bound_test");
     let _ = fs::create_dir_all(&temp_ws);
     set_workspace_root_inner(temp_ws.to_str().unwrap()).unwrap();
 
@@ -57,7 +57,7 @@ fn test_path_traversal_null_byte_and_workspace_confinement() {
 #[test]
 fn test_pasted_image_contract_saves_relative_to_note() {
     let _guard = TEST_MUTEX.lock().unwrap();
-    let temp_dir = std::env::temp_dir().join("markforge_img_test");
+    let temp_dir = std::env::temp_dir().join("markseal_img_test");
     let _ = fs::create_dir_all(&temp_dir);
     set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
 
@@ -86,7 +86,7 @@ fn test_html_export_strips_xss_payloads() {
     let _ = fs::create_dir_all(&temp_dir);
     set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
 
-    let out_html = temp_dir.join("markforge_xss_test.html");
+    let out_html = temp_dir.join("markseal_xss_test.html");
     let path_str = out_html.to_str().unwrap().to_string();
 
     let malicious_md = "# Hello\n<script>alert('pwned')</script>\n<img src=x onerror=alert(1)>";
@@ -306,7 +306,7 @@ fn sample_image_payload() -> Vec<u8> {
 #[test]
 fn test_encrypted_image_never_touches_disk_in_plaintext() {
     let _guard = TEST_MUTEX.lock().unwrap();
-    let temp_dir = std::env::temp_dir().join("markforge_enc_img_test");
+    let temp_dir = std::env::temp_dir().join("markseal_enc_img_test");
     let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir).unwrap();
     set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
@@ -356,7 +356,7 @@ fn test_encrypted_image_never_touches_disk_in_plaintext() {
 #[test]
 fn test_seal_note_encrypts_existing_images_and_rewrites_links() {
     let _guard = TEST_MUTEX.lock().unwrap();
-    let base = std::env::temp_dir().join("markforge_seal_test");
+    let base = std::env::temp_dir().join("markseal_seal_test");
     let _ = fs::remove_dir_all(&base);
     let ws_dir = base.join("workspace");
     fs::create_dir_all(ws_dir.join("assets")).unwrap();
@@ -435,7 +435,7 @@ fn test_seal_note_encrypts_existing_images_and_rewrites_links() {
 #[test]
 fn test_seal_note_rekeys_images_and_rolls_back_on_failure() {
     let _guard = TEST_MUTEX.lock().unwrap();
-    let temp_dir = std::env::temp_dir().join("markforge_rekey_test");
+    let temp_dir = std::env::temp_dir().join("markseal_rekey_test");
     let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir).unwrap();
     set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();
@@ -553,7 +553,7 @@ fn test_seal_note_rekeys_images_and_rolls_back_on_failure() {
 #[test]
 fn test_encrypted_image_is_bound_to_its_file_name() {
     let _guard = TEST_MUTEX.lock().unwrap();
-    let temp_dir = std::env::temp_dir().join("markforge_img_name_test");
+    let temp_dir = std::env::temp_dir().join("markseal_img_name_test");
     let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir).unwrap();
     set_workspace_root_inner(temp_dir.to_str().unwrap()).unwrap();

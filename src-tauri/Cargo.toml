@@ -1,12 +1,12 @@
 [package]
-name = "markforge"
+name = "markseal"
 version = "0.1.0"
 description = "High-performance, zero-knowledge native Markdown editor"
-authors = ["MarkForge Security Team"]
+authors = ["D3lta Security"]
 edition = "2021"
 
 [lib]
-name = "markforge_lib"
+name = "markseal_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
