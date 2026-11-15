@@ -1,113 +1,156 @@
 # Markseal
 
-Markseal is a hardened, local-first markdown note editor and encrypted personal vault built with **Tauri v2**, **React 19**, **TypeScript**, and **Milkdown Crepe**.
+Markseal is a local-first, offline Markdown editor for Windows. Any note can be
+encrypted on its own, together with its images, with a passphrase only you know.
+There is no account, no cloud and no telemetry.
 
----
+Built with Tauri v2 (Rust), React 19 and Milkdown Crepe.
+
+> **Status: 0.2.0 public preview.** Tested on Windows 11 only. The installer is
+> not code-signed yet, so Windows shows a SmartScreen warning on first run. Read
+> [What is not ready yet](#what-is-not-ready-yet) before you trust it with
+> important notes, and keep backups.
 
 ## Features
 
-- **WYSIWYG Markdown Editing**: Smooth, modern editing experience powered by Milkdown Crepe (ProseMirror engine) with support for tables, lists, code blocks, task items, and live previews.
-- **Zero-Knowledge Encrypted Vault**: Encrypt sensitive notes into self-contained `.enc` files using authenticated AES-256-GCM encryption with Argon2id key derivation.
-- **Workspace Navigation & Search**: Fast tree-based workspace explorer with full-text search across all markdown files within the active folder.
-- **Direct Image Pasting**: Paste images directly from the clipboard. Images are automatically saved into `<note_dir>/assets/img_<timestamp>.<ext>` and referenced relatively.
-- **Safe HTML Export**: Export notes to standalone HTML documents with styled layout and automatic sanitization of script tags and malicious attributes.
-- **Dynamic Theming**: Seamless switching between Light, Dark, Nord, and Solarized themes without re-initializing the editor or losing cursor position / undo history.
-- **Privacy & Offline First**: Zero cloud dependencies, zero telemetry, zero background network calls.
+**Writing**
 
----
+- WYSIWYG Markdown editing: tables, task lists, code blocks with syntax
+  highlighting, LaTeX math and Mermaid diagrams.
+- Open a folder as a workspace: file tree, tabs, a clickable outline of the
+  current note, live word count and full-text search across the folder.
+- Command palette (`Ctrl+K`) and focus mode.
+- Four themes: Obsidian Cobalt (default), Editorial Ivory, Cyber Neon and
+  Nordic Slate.
+- Paste an image straight from the clipboard.
+- Export a note to a sanitized, standalone HTML file, or print it to PDF.
 
-## Architecture
+**Protection**
 
-Markseal uses a modular architecture dividing user interface from systems-level I/O:
+- **Per-note encryption.** A note is encrypted into a single `.md.enc` file
+  with AES-256-GCM; the key is derived from your passphrase with Argon2id.
+- **Images are encrypted too.** Pictures that belong to an encrypted note are
+  stored encrypted and are only ever decrypted in memory.
+- **Change passphrase.** The note and its images are re-encrypted as one unit;
+  a crash halfway leaves the old note readable with the old passphrase.
+- **Auto-lock.** Decrypted notes lock after 5 minutes idle (1, 5, 15, 30 or
+  never), and one minute after the window is hidden or minimised.
+- **Panic key.** `Ctrl+Shift+L` locks every decrypted note at once and clears
+  the clipboard.
+- **Screen-capture shield.** While a decrypted note is on screen the window is
+  hidden from screenshots, screen sharing and Windows Recall. On by default.
+- **Offline by design.** The Content Security Policy gives the app window no
+  route to the network.
 
-- **Frontend**: React 19, TypeScript, Vite, Milkdown Crepe, Lucide React icons, and tailored CSS variables.
-- **Backend (Rust / Tauri v2)**: Native window management, secure filesystem operations, cryptographic primitives, and asset protocol handling.
-- **IPC Protocol**: All communication between frontend and backend passes through strongly typed, validated Tauri invoke commands.
+There is no passphrase recovery. If you forget the passphrase of a note, the
+note is gone.
 
-```mermaid
-flowchart LR
-    A["Frontend (React + Milkdown)"] -->|"Tauri IPC Invoke"| B["Rust Core (Tauri v2)"]
-    B --> C["Argon2id + AES-256-GCM Vault"]
-    B --> D["Atomic File I/O Engine"]
-    B --> E["Workspace Confinement & Session Allowlist"]
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+K` | Command palette |
+| `Ctrl+N` | New note |
+| `Ctrl+S` | Save |
+| `Ctrl+W` | Close tab |
+| `Ctrl+L` | Encrypt the note, or change the passphrase of an encrypted note |
+| `Ctrl+Shift+L` | Panic key: lock all notes and clear the clipboard |
+| `Ctrl+Shift+F` | Search the workspace |
+| `Ctrl+Shift+E` | Show or hide the sidebar |
+| `Ctrl+E` | Export sanitized HTML |
+| `Ctrl+P` | Print or save as PDF |
+| `Ctrl+\` or `F11` | Focus mode |
+
+## Install
+
+Markseal 0.2.0 supports **Windows 11**. Windows 10 and macOS have not been
+tested.
+
+1. Download `Markseal_0.2.0_x64-setup.exe` and `SHA256SUMS` from the Releases
+   page of this repository.
+2. Check the download (see below).
+3. Run the installer. It installs for the current user and does not need
+   administrator rights. Windows will show "Windows protected your PC" because
+   the preview is not signed: choose **More info → Run anyway** only after the
+   checksum matches.
+
+### Verify your download
+
+In PowerShell, in the folder with the downloaded file:
+
+```powershell
+Get-FileHash .\Markseal_0.2.0_x64-setup.exe -Algorithm SHA256
 ```
 
----
+The hash must be the same as the line for that file in `SHA256SUMS`. If it is
+different, delete the file and do not run it.
 
-## Security Model & Hardening
+## Security
 
-Markseal is designed with defense-in-depth security principles:
+The full threat model, the enforced boundaries and the known limitations are in
+[SECURITY.md](SECURITY.md). In short:
 
-### 1. Cryptographic Specifications
-- **Cipher**: AES-256-GCM (Galois/Counter Mode) providing authenticated encryption and tamper detection.
-- **Key Derivation**: Argon2id (`v=0x13`, 64 MiB memory cost, 3 iterations, 4 parallelism lanes).
-- **Salt & Nonce**: Cryptographically secure random 16-byte salt and 12-byte nonce per encrypted file (`rand::rngs::OsRng`).
-- **Memory Hygiene**: Passwords and decrypted plaintext buffers are managed using `zeroize::Zeroizing` to guarantee that memory is wiped when dropped.
+- AES-256-GCM with a random salt and nonce per save; Argon2id key derivation
+  (64 MiB memory, 3 iterations, 4 lanes). The file header is authenticated.
+- File access is confined to the open workspace folder and to paths you pick
+  in a native Open/Save dialog. Deleting is stricter still.
+- Saves are atomic (temporary file, flush, rename).
+- Exported HTML is sanitized.
+- File reads, saves, pastes and search are capped at 25 MiB.
 
-### 2. Strict Workspace Confinement & Session Allowlist
-- **Confinement**: Path canonicalization resolves all symlinks and verifies that target files reside strictly within the active workspace root.
-- **Traversal Prevention**: Relative parent segments (`..`) and null bytes (`\0`) are rejected unconditionally.
-- **Session Allowlist**: When opening or saving a file outside the workspace via native system dialogs ("Save As" or "Export HTML"), the canonical path is recorded in a temporary in-memory session allowlist.
-- **Strict Deletion Boundary**: Destructive deletion operations (`delete_note_file`) enforce strict workspace confinement and deliberately ignore the session allowlist; files outside the active workspace cannot be deleted through Markseal.
+Please report vulnerabilities privately, as described in
+[SECURITY.md](SECURITY.md#reporting-a-vulnerability).
 
-### 3. Atomic File Writes
-- All note saves, encrypted exports, and pasted assets are written via a temporary sibling file (`.<filename>.<timestamp>.tmp`) with synchronous flushing to disk (`sync_all()`) before an atomic rename, preventing data corruption during unexpected power cuts or crashes.
+### What is not ready yet
 
-### 4. Denial-of-Service Defense
-- File operations (reading, saving, searching, and pasting assets) enforce a strict **25 MiB cap** (`25 * 1024 * 1024` bytes) to prevent memory exhaustion and denial-of-service vulnerabilities.
+- The installer is **unsigned**. Code signing is planned.
+- Tested on **Windows 11 only**, by one person. There is no automatic update.
+- Locking Windows (`Win+L`) does not lock notes at once; they lock when the
+  idle time runs out.
+- "Overwrite & delete the original" is best-effort. It cannot guarantee
+  erasure on SSDs or copy-on-write file systems. Use full-disk encryption
+  (BitLocker) as well.
+- The capture shield stops ordinary capture tools. It is not protection
+  against malware already running under your account.
+- Decrypted text lives in the app's memory while a note is open and is
+  released, not wiped, when it locks.
+- One low-severity advisory in the math renderer (KaTeX) has no clean fix yet;
+  see SECURITY.md.
 
-### 5. SSD / CoW Deletion Caveat
-- The note deletion feature performs a single-pass zero overwrite before unlinking on a best-effort basis.
-- **Important limitation**: On wear-leveled flash media (SSDs, NVMe drives) or copy-on-write filesystems (NTFS Volume Shadow Copies, APFS, Btrfs, ZFS), physical blocks may persist in storage controller wear-leveling translation layers until overwritten or cleared by TRIM/garbage collection. For complete forensic data eradication, full-disk encryption (e.g., BitLocker, FileVault, LUKS) is recommended.
+## Build from source
 
-### 6. Production Content Security Policy (CSP)
-- Markseal enforces a strict Content Security Policy in production builds:
-  ```text
-  default-src 'self';
-  img-src 'self' asset: http://asset.localhost https://asset.localhost data: blob:;
-  style-src 'self' 'unsafe-inline';
-  font-src 'self' data:;
-  script-src 'self';
-  connect-src 'self' ipc: http://ipc.localhost
-  ```
-- Unsafe evaluation (`'unsafe-eval'`) and external network connections are prohibited.
+Requirements: [Node.js](https://nodejs.org/) 20 or later,
+[Rust](https://www.rust-lang.org/) (stable) and the Microsoft C++ Build Tools.
 
----
-
-## Getting Started
-
-### Prerequisites
-- [Node.js](https://nodejs.org/) (v18 or later recommended)
-- [Rust](https://www.rust-lang.org/) (1.78+ recommended)
-- Windows C++ Build Tools (or equivalent platform build essentials)
-
-### Development
-Install dependencies:
 ```bash
 npm install
-```
-
-Start the application in development mode:
-```bash
 npm run tauri dev
 ```
 
-### Running Tests
-Execute the backend security and integration test suite:
+Run the security tests:
+
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-### Production Build
-Build the optimized production binary and installer:
+Build the installer (written to `src-tauri/target/release/bundle/nsis/`):
+
 ```bash
-npm run build
 npm run tauri build
 ```
 
----
+## How it is put together
 
-## License
+- **Frontend:** React 19, TypeScript, Vite, Milkdown Crepe, lucide icons.
+- **Backend:** Rust on Tauri v2. It owns all file access, the cryptography,
+  HTML export and the window.
+- The two sides talk only through Tauri `invoke` commands; every path the
+  frontend sends is validated again in Rust.
 
-Markseal is licensed under the [MIT License](LICENSE).
-Copyright (c) 2026 Markseal Contributors.
+Encrypted files start with the tags `MARKFORGE_ENC_V1` (notes) and
+`MARKFORGE_IMG_V1` (images). They carry the project's earlier name and are part
+of the file format, so they stay.
+
+## Licence
+
+[MIT](LICENSE). Copyright (c) 2026 D3lta Security.

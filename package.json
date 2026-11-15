@@ -1,7 +1,10 @@
 {
   "name": "markseal",
   "private": true,
-  "version": "0.1.0",
+  "description": "Local-first, offline Markdown editor with per-note encryption",
+  "license": "MIT",
+  "author": "D3lta Security",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

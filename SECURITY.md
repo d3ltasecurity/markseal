@@ -203,12 +203,18 @@ and workspace search to prevent out-of-memory conditions.
 ## Audit trail
 
 The pre-release hardening history is in git:
-- `d12505e` — initial review fixes (image-paste contract, workspace lock, CSP,
+- `d7ef06f` — initial review fixes (image-paste contract, workspace lock, CSP,
   25 MiB caps, atomic writes).
-- `0ecf63b` — dialog-path validation for Save-As/Export, dynamic asset scope,
+- `96f9638` — dialog-path validation for Save-As/Export, dynamic asset scope,
   live-theme CSS, dead-code removal.
-- `82bad79` — session dialog allowlist, strict delete confinement, production
+- `820a3d8` — session dialog allowlist, strict delete confinement, production
   CSP, license + documentation.
+- `7a4f728` — images of encrypted notes are encrypted; `seal_note`.
+- `3bb3160` — auto-lock, panic key, screen-capture shield.
+- `fd6825b` — image bound to its file name, re-key into new files, hard-link
+  check before zero-overwrite, empty static asset scope, lock when hidden.
+- `8ad1aa1`, `ca8234a` — with no workspace open, delete and then every file
+  command accept only a dialog-authorized path.
 
 Covered by 13 Rust integration tests in `src-tauri/tests/security_tests.rs`
 (encryption + tamper detection, path traversal / null byte, workspace

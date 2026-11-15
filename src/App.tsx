@@ -1551,6 +1551,8 @@ export default function App() {
   }, []);
 
   const strength = scorePassphrase(vaultPassword);
+  // The same dialog encrypts a plain note and re-keys an encrypted one; only the wording differs.
+  const isRekey = vaultModal.mode === "encrypt" && !!activeTab?.isEncrypted;
   const confirmTab = tabs.find((t) => t.path === confirmClosePath);
   const canShredOriginal =
       vaultModal.mode === "encrypt" &&
@@ -2005,20 +2007,26 @@ export default function App() {
                     </div>
                     <div>
                       <h3 className="modal-title" id="vault-title">
-                        {vaultModal.mode === "encrypt"
-                            ? "Encrypt note with Zero-Knowledge Vault"
-                            : "Unlock encrypted note"}
+                        {isRekey
+                            ? "Change passphrase"
+                            : vaultModal.mode === "encrypt"
+                                ? "Encrypt note with Zero-Knowledge Vault"
+                                : "Unlock encrypted note"}
                       </h3>
                       <p className="modal-sub">
-                        {vaultModal.mode === "encrypt"
-                            ? "Derived via Argon2id (64 MiB RAM) & encrypted with AES-256-GCM. Without this passphrase, recovery is mathematically impossible."
-                            : `Enter passphrase to decrypt: ${baseName(vaultModal.targetPath)}`}
+                        {isRekey
+                            ? "The note and its images are encrypted again under the new passphrase, and the old one stops working. Without the new passphrase, recovery is mathematically impossible."
+                            : vaultModal.mode === "encrypt"
+                                ? "Derived via Argon2id (64 MiB RAM) & encrypted with AES-256-GCM. Without this passphrase, recovery is mathematically impossible."
+                                : `Enter passphrase to decrypt: ${baseName(vaultModal.targetPath)}`}
                       </p>
                     </div>
                   </div>
 
                   <div className="field">
-                    <label className="field-label" htmlFor="vault-pass">Passphrase</label>
+                    <label className="field-label" htmlFor="vault-pass">
+                      {isRekey ? "New passphrase" : "Passphrase"}
+                    </label>
                     <div className="input-wrap">
                       <input
                           id="vault-pass"
@@ -2064,7 +2072,9 @@ export default function App() {
                   {vaultModal.mode === "encrypt" && (
                       <>
                         <div className="field">
-                          <label className="field-label" htmlFor="vault-confirm">Confirm passphrase</label>
+                          <label className="field-label" htmlFor="vault-confirm">
+                            {isRekey ? "Confirm new passphrase" : "Confirm passphrase"}
+                          </label>
                           <div className="input-wrap">
                             <input
                                 id="vault-confirm"
@@ -2126,9 +2136,11 @@ export default function App() {
                     <button type="submit" className="btn btn-primary" disabled={vaultBusy}>
                       {vaultBusy
                           ? "Deriving key…"
-                          : vaultModal.mode === "encrypt"
-                              ? "Encrypt & Save"
-                              : "Decrypt & Open"}
+                          : isRekey
+                              ? "Change passphrase"
+                              : vaultModal.mode === "encrypt"
+                                  ? "Encrypt & Save"
+                                  : "Decrypt & Open"}
                     </button>
                   </div>
                 </div>

@@ -1,8 +1,11 @@
 [package]
 name = "markseal"
-version = "0.1.0"
-description = "High-performance, zero-knowledge native Markdown editor"
+version = "0.2.0"
+description = "Local-first, offline Markdown editor with per-note encryption (AES-256-GCM, Argon2id)"
 authors = ["D3lta Security"]
+license = "MIT"
+# Not on crates.io; the app is shipped as an installer.
+publish = false
 edition = "2021"
 
 [lib]
