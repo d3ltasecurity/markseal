@@ -22,6 +22,8 @@ First public preview. Windows 11 only; the installer is not code-signed.
 - Panic key `Ctrl+Shift+L`: locks every decrypted note and clears the clipboard.
 - Screen-capture shield: the window is hidden from screenshots, screen sharing
   and Windows Recall while a decrypted note is on screen.
+- Markseal app icon (a page with a padlock); the source drawing is
+  `src-tauri/icons/markseal-icon.svg`.
 - `SECURITY.md` with the threat model, enforced boundaries and known
   limitations.
 
