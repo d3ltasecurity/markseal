@@ -37,6 +37,12 @@
     "homepage": "https://d3ltasecurity.in",
     "shortDescription": "Offline Markdown editor with per-note encryption",
     "longDescription": "Markseal is a local-first, offline Markdown editor. Notes and their images can be encrypted one by one with AES-256-GCM and Argon2id. No account, no cloud, no telemetry.",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
