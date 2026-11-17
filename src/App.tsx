@@ -113,6 +113,8 @@ const AUTO_LOCK_DEFAULT = 5;
 // Once the window is hidden or minimised, decrypted notes lock after this long instead of
 // waiting out the full idle time.
 const HIDDEN_LOCK_MS = 60_000;
+// How often the native window state (minimised / not visible) is read.
+const WINDOW_STATE_POLL_MS = 5_000;
 type LockReason = "idle" | "panic" | "hidden";
 
 const WELCOME_NOTE =
@@ -1135,29 +1137,68 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [autoLockMinutes]);
 
-  // Out of sight: lock shortly after the window is hidden or minimised. The elapsed time is
+  // Out of sight: lock shortly after the window is hidden or minimised. Two signals are used,
+  // because on Windows the webview does not report a minimised window as hidden: the page's
+  // own visibility state, and the native window state read through Tauri. The elapsed time is
   // also checked on the wall clock when the window comes back, because timers in a hidden
   // window can be delayed and stop altogether while the machine sleeps.
   useEffect(() => {
     if (autoLockMinutes === 0) return;
     const grace = Math.min(HIDDEN_LOCK_MS, autoLockMinutes * 60_000);
-    let hiddenAt: number | null = document.visibilityState === "hidden" ? Date.now() : null;
+    const appWindow = getCurrentWindow();
+    let disposed = false;
+    let pageHidden = document.visibilityState === "hidden";
+    let windowHidden = false;
+    let hiddenAt: number | null = pageHidden ? Date.now() : null;
+    let fired = false;
     let timer = 0;
-    const onVisibility = () => {
-      window.clearTimeout(timer);
-      if (document.visibilityState === "hidden") {
-        hiddenAt = Date.now();
-        timer = window.setTimeout(() => void lockVaultRef.current("hidden"), grace);
-      } else {
-        if (hiddenAt !== null && Date.now() - hiddenAt >= grace) {
-          void lockVaultRef.current("hidden");
+    const lockOnce = () => {
+      if (fired) return;
+      fired = true;
+      void lockVaultRef.current("hidden");
+    };
+    const evaluate = () => {
+      if (pageHidden || windowHidden) {
+        if (hiddenAt === null) {
+          hiddenAt = Date.now();
+          fired = false;
+          window.clearTimeout(timer);
+          timer = window.setTimeout(lockOnce, grace);
+        } else if (Date.now() - hiddenAt >= grace) {
+          lockOnce();
         }
-        hiddenAt = null;
+        return;
       }
+      window.clearTimeout(timer);
+      if (hiddenAt !== null && Date.now() - hiddenAt >= grace) lockOnce();
+      hiddenAt = null;
+      fired = false;
+    };
+    const onVisibility = () => {
+      pageHidden = document.visibilityState === "hidden";
+      evaluate();
+    };
+    const pollWindow = async () => {
+      try {
+        const [minimised, visible] = await Promise.all([
+          appWindow.isMinimized(),
+          appWindow.isVisible(),
+        ]);
+        if (disposed) return;
+        windowHidden = minimised || !visible;
+      } catch {
+        // Not running inside Tauri, or the call failed: keep the last known window state.
+        return;
+      }
+      evaluate();
     };
     document.addEventListener("visibilitychange", onVisibility);
+    const poll = window.setInterval(() => void pollWindow(), WINDOW_STATE_POLL_MS);
+    void pollWindow();
     return () => {
+      disposed = true;
       window.clearTimeout(timer);
+      window.clearInterval(poll);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [autoLockMinutes]);

@@ -15,7 +15,8 @@
         "title": "Markseal",
         "width": 1280,
         "height": 820,
-        "transparent": true
+        "transparent": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-networking --disable-component-update --no-proxy-server"
       }
     ],
     "security": {
@@ -36,7 +37,7 @@
     "licenseFile": "../LICENSE",
     "homepage": "https://d3ltasecurity.in",
     "shortDescription": "Offline Markdown editor with per-note encryption",
-    "longDescription": "Markseal is a local-first, offline Markdown editor. Notes and their images can be encrypted one by one with AES-256-GCM and Argon2id. No account, no cloud, no telemetry.",
+    "longDescription": "Markseal is a local-first, offline Markdown editor. Notes and their images can be encrypted one by one with AES-256-GCM and Argon2id. No account and no cloud; Markseal itself sends nothing anywhere.",
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",

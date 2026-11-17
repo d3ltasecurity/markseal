@@ -112,7 +112,12 @@ outside it overwritten.
   hidden or the machine slept.
 - **Out of view.** When the window is hidden or minimised, notes lock after one
   minute (or the auto-lock time, if that is shorter). Turning auto-lock off
-  turns this off too.
+  turns this off too. Two signals are used: the page's own visibility state,
+  and the native window state (minimised / not visible), which is read every
+  5 seconds. The second one is needed because WebView2 does not report a
+  minimised window as hidden. Expect the lock 60 to 65 seconds after
+  minimising. A window that is only covered by other windows does not count as
+  out of view.
 - **Panic key (`Ctrl+Shift+L`).** Does the same immediately and also clears the
   clipboard. The window is covered before any note is saved or closed.
 - A note that cannot be saved is left open rather than discarded; locking never
@@ -130,8 +135,10 @@ handlers (e.g. `onerror=`) are stripped (covered by tests).
 ### 5. Content Security Policy
 The production CSP is locked down: `script-src 'self'` (no `unsafe-eval`),
 `connect-src 'self' ipc: http://ipc.localhost` only. Even in the unlikely event
-of script injection into the webview, there is **no network egress path** to
-exfiltrate file contents.
+of script injection into the webview, there is **no network egress path** from
+the page to exfiltrate file contents. This is a statement about Markseal's own
+page. The WebView2 runtime underneath is a separate matter; see "Known
+limitations".
 
 ### 6. Resource limits
 A 25 MiB cap (`MAX_FILE_SIZE_BYTES`) applies to file reads, saves, image pastes
@@ -155,10 +162,33 @@ and workspace search to prevent out-of-memory conditions.
 - **Locking drops references, it does not wipe webview memory.** Decrypted text
   and the session passphrase live in JavaScript memory while a note is open;
   after a lock they are released for garbage collection, not overwritten.
+- **The WebView2 runtime can contact Microsoft on its own.** Markseal's window
+  is drawn by Microsoft Edge WebView2, a Windows component that Markseal does
+  not ship or control. Measured on runtime 157.0.4341.46 (November 2026) with
+  Chromium's own network log: with default settings the runtime fetched its
+  configuration from `config.edge.skype.com`, looked for a proxy (`wpad`) and
+  downloaded browser components. Markseal therefore starts the runtime with
+  `--disable-background-networking --disable-component-update
+  --no-proxy-server`; with these the network log showed no outside request.
+  **One connection remains that Markseal cannot switch off:** the runtime's
+  main process sometimes opens an HTTPS connection to Microsoft's Office /
+  Outlook servers shortly after start-up. It does not pass through the page or
+  through Chromium's network stack, and it is a known, open issue for every
+  WebView2 application (MicrosoftEdge/WebView2Feedback issue 5760). Markseal
+  hands the runtime no note text, file name or passphrase to send, but the
+  content of that connection is Microsoft's, is encrypted, and was not
+  inspected. At the least it shows Microsoft that a WebView2 application
+  started at your IP address. If that matters to you, run Markseal on a machine
+  without network access, or block outbound traffic with a firewall. The
+  switches above are not an interface Microsoft supports and may stop working
+  in a later runtime; re-measure after runtime updates. Security updates for
+  the runtime arrive through the Edge update service, which these switches do
+  not touch.
 - **Locking Windows does not lock notes at once.** There is no hook into the
   Windows session lock (`Win+L`). Notes lock when the idle time runs out, or one
-  minute after the window is reported hidden. Whether WebView2 reports a locked
-  session as "hidden" has not been verified, so assume the idle time applies.
+  minute after the window is hidden or minimised. A locked Windows session
+  leaves the window neither hidden nor minimised as far as is known (not
+  verified), so assume the idle time applies.
 - **Decrypted images are released, not wiped.** They are shown from in-memory
   `blob:` URLs that are revoked when the note is locked or its tab is left; the
   bytes are then freed by the webview, not overwritten.

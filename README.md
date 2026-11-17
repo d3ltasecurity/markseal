@@ -2,7 +2,7 @@
 
 Markseal is a local-first, offline Markdown editor for Windows. Any note can be
 encrypted on its own, together with its images, with a passphrase only you know.
-There is no account, no cloud and no telemetry.
+There is no account and no cloud, and Markseal itself sends nothing anywhere.
 
 Built with Tauri v2 (Rust), React 19 and Milkdown Crepe.
 
@@ -34,13 +34,15 @@ Built with Tauri v2 (Rust), React 19 and Milkdown Crepe.
 - **Change passphrase.** The note and its images are re-encrypted as one unit;
   a crash halfway leaves the old note readable with the old passphrase.
 - **Auto-lock.** Decrypted notes lock after 5 minutes idle (1, 5, 15, 30 or
-  never), and one minute after the window is hidden or minimised.
+  never), and about one minute after the window is hidden or minimised.
 - **Panic key.** `Ctrl+Shift+L` locks every decrypted note at once and clears
   the clipboard.
 - **Screen-capture shield.** While a decrypted note is on screen the window is
   hidden from screenshots, screen sharing and Windows Recall. On by default.
-- **Offline by design.** The Content Security Policy gives the app window no
-  route to the network.
+- **Offline by design.** Markseal has no network code, and the Content Security
+  Policy gives the app window no route to the network. One caveat: the Microsoft
+  WebView2 runtime that draws the window can contact Microsoft on its own. See
+  "Known limitations" in `SECURITY.md`.
 
 There is no passphrase recovery. If you forget the passphrase of a note, the
 note is gone.
@@ -105,6 +107,9 @@ Please report vulnerabilities privately, as described in
 
 - The installer is **unsigned**. Code signing is planned.
 - Tested on **Windows 11 only**, by one person. There is no automatic update.
+- The Microsoft WebView2 runtime that Markseal runs on can still open a
+  connection to Microsoft at start-up. Markseal switches off what it can, but
+  not all of it; details in `SECURITY.md`.
 - Locking Windows (`Win+L`) does not lock notes at once; they lock when the
   idle time runs out.
 - "Overwrite & delete the original" is best-effort. It cannot guarantee

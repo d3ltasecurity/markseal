@@ -17,8 +17,8 @@ First public preview. Windows 11 only; the installer is not code-signed.
   only in memory.
 - Encrypting a note, or changing its passphrase, handles the note and its
   images as one all-or-nothing step.
-- Auto-lock after idle time (default 5 minutes) and one minute after the window
-  is hidden or minimised.
+- Auto-lock after idle time (default 5 minutes) and about one minute after the
+  window is hidden or minimised.
 - Panic key `Ctrl+Shift+L`: locks every decrypted note and clears the clipboard.
 - Screen-capture shield: the window is hidden from screenshots, screen sharing
   and Windows Recall while a decrypted note is on screen.
@@ -45,6 +45,14 @@ First public preview. Windows 11 only; the installer is not code-signed.
 - A file with more than one hard link is never zero-overwritten on delete.
 - The app window starts with no access to local files; access is granted at
   runtime for the opened folder only.
+- The out-of-view lock now also reads the native window state. Before this,
+  a minimised window did not lock, because WebView2 does not report a minimised
+  window as hidden (found in the installer test).
+- The WebView2 runtime is started with background networking, component
+  updates and proxy auto-detection switched off. This removes the runtime's own
+  start-up requests to Microsoft that Chromium's network log can see. One
+  connection made by the runtime itself remains and cannot be switched off by
+  an application; see "Known limitations" in `SECURITY.md`.
 
 ### Known issues
 
