@@ -34,7 +34,9 @@ Built with Tauri v2 (Rust), React 19 and Milkdown Crepe.
 - **Change passphrase.** The note and its images are re-encrypted as one unit;
   a crash halfway leaves the old note readable with the old passphrase.
 - **Auto-lock.** Decrypted notes lock after 5 minutes idle (1, 5, 15, 30 or
-  never), and about one minute after the window is hidden or minimised.
+  never), and about one minute after the window is minimised or hidden. Locking
+  Windows (`Win+L`), switching virtual desktop or covering the window does not
+  count as minimised; the idle time applies then.
 - **Panic key.** `Ctrl+Shift+L` locks every decrypted note at once and clears
   the clipboard.
 - **Screen-capture shield.** While a decrypted note is on screen the window is

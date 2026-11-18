@@ -1163,7 +1163,7 @@ export default function App() {
           hiddenAt = Date.now();
           fired = false;
           window.clearTimeout(timer);
-          timer = window.setTimeout(lockOnce, grace);
+          timer = window.setTimeout(() => void onGraceElapsed(), grace);
         } else if (Date.now() - hiddenAt >= grace) {
           lockOnce();
         }
@@ -1178,21 +1178,44 @@ export default function App() {
       pageHidden = document.visibilityState === "hidden";
       evaluate();
     };
-    const pollWindow = async () => {
+    // Reads the native window state. Returns false when it could not be read (not running inside
+    // Tauri, or the call failed); the last known state is kept then.
+    const refreshWindowState = async () => {
       try {
         const [minimised, visible] = await Promise.all([
           appWindow.isMinimized(),
           appWindow.isVisible(),
         ]);
-        if (disposed) return;
         windowHidden = minimised || !visible;
+        return true;
       } catch {
-        // Not running inside Tauri, or the call failed: keep the last known window state.
-        return;
+        return false;
       }
+    };
+    const pollWindow = async () => {
+      const ok = await refreshWindowState();
+      if (disposed || !ok) return;
       evaluate();
     };
+    // The grace timer re-reads the window state before it locks. A window restored in the last
+    // few seconds before the next poll is then not locked in the user's face; the timer is simply
+    // reset. A return after sleep or a long absence still locks through evaluate()'s wall-clock check.
+    const onGraceElapsed = async () => {
+      await refreshWindowState();
+      if (disposed) return;
+      if (pageHidden || windowHidden) {
+        lockOnce();
+      } else {
+        hiddenAt = null;
+        fired = false;
+      }
+    };
+    // Minimising or restoring moves focus, so re-read the window state at once instead of waiting
+    // for the next poll.
+    const onFocusChange = () => void pollWindow();
     document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onFocusChange);
+    window.addEventListener("blur", onFocusChange);
     const poll = window.setInterval(() => void pollWindow(), WINDOW_STATE_POLL_MS);
     void pollWindow();
     return () => {
@@ -1200,6 +1223,8 @@ export default function App() {
       window.clearTimeout(timer);
       window.clearInterval(poll);
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocusChange);
+      window.removeEventListener("blur", onFocusChange);
     };
   }, [autoLockMinutes]);
 

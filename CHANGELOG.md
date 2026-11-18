@@ -45,7 +45,8 @@ First public preview. Windows 11 only; the installer is not code-signed.
 - A file with more than one hard link is never zero-overwritten on delete.
 - The app window starts with no access to local files; access is granted at
   runtime for the opened folder only.
-- The out-of-view lock now also reads the native window state. Before this,
+- The out-of-view lock now also reads the native window state (on a 5-second
+  poll and on every focus change, and once more just before it locks). Before this,
   a minimised window did not lock, because WebView2 does not report a minimised
   window as hidden (found in the installer test).
 - HTML export sanitiser `ammonia` updated 4.2.4 -> 4.2.5 (RUSTSEC-2026-0533:

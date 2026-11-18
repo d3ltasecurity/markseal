@@ -116,8 +116,12 @@ outside it overwritten.
   and the native window state (minimised / not visible), which is read every
   5 seconds. The second one is needed because WebView2 does not report a
   minimised window as hidden. Expect the lock 60 to 65 seconds after
-  minimising. A window that is only covered by other windows does not count as
-  out of view.
+  minimising. A window that is only covered by other windows, sits on another
+  virtual desktop, or is behind the Windows lock screen (`Win+L`) still counts
+  as visible: the idle auto-lock (default 5 minutes) is what protects it then.
+  Restoring the window is noticed at once (focus change), and the lock re-reads
+  the window state before it fires, so a window restored just before the
+  minute is up is not locked.
 - **Panic key (`Ctrl+Shift+L`).** Does the same immediately and also clears the
   clipboard. The window is covered before any note is saved or closed.
 - A note that cannot be saved is left open rather than discarded; locking never
