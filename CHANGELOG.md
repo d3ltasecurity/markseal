@@ -48,6 +48,8 @@ First public preview. Windows 11 only; the installer is not code-signed.
 - The out-of-view lock now also reads the native window state. Before this,
   a minimised window did not lock, because WebView2 does not report a minimised
   window as hidden (found in the installer test).
+- HTML export sanitiser `ammonia` updated 4.2.4 -> 4.2.5 (RUSTSEC-2026-0533:
+  mutation XSS through embedded SVG and MathML).
 - The WebView2 runtime is started with background networking, component
   updates and proxy auto-detection switched off. This removes the runtime's own
   start-up requests to Microsoft that Chromium's network log can see. One
